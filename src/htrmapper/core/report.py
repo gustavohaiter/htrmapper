@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from statistics import mean
 
+from htrmapper.core import theme
 from htrmapper.core.project import Project
 from htrmapper.core.system_info import SystemInfo, detect_system_info
 from htrmapper.geo.coverage import Point2D, convex_hull_area_km2
@@ -164,19 +165,23 @@ def _render_camera_position_map_png(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(5, 5), dpi=110)
+    fig, ax = plt.subplots(figsize=(5, 5), dpi=110, facecolor=theme.BACKGROUND)
+    ax.set_facecolor(theme.BACKGROUND)
     xs = [p[0] for p in points_xy]
     ys = [p[1] for p in points_xy]
-    ax.scatter(xs, ys, c="tab:green", s=18, edgecolors="black", linewidths=0.4)
+    ax.scatter(xs, ys, c=theme.PRIMARY, s=18, edgecolors=theme.PRIMARY_DARK, linewidths=0.5)
     ax.set_aspect("equal", adjustable="datalim")
-    ax.set_xlabel(f"Este (m) — EPSG:{project_epsg}")
-    ax.set_ylabel("Norte (m)")
-    ax.set_title(f"Posições das câmeras ({len(points_xy)})")
-    ax.grid(True, linewidth=0.3)
+    ax.set_xlabel(f"Este (m) — EPSG:{project_epsg}", color=theme.PRIMARY_DARK)
+    ax.set_ylabel("Norte (m)", color=theme.PRIMARY_DARK)
+    ax.set_title(f"Posições das câmeras ({len(points_xy)})", color=theme.PRIMARY_DARK)
+    ax.tick_params(colors=theme.TEXT_MUTED)
+    for spine in ax.spines.values():
+        spine.set_color(theme.BORDER)
+    ax.grid(True, linewidth=0.3, color=theme.BORDER)
     fig.tight_layout()
 
     buf = io.BytesIO()
-    fig.savefig(buf, format="png")
+    fig.savefig(buf, format="png", facecolor=fig.get_facecolor())
     plt.close(fig)
     return buf.getvalue()
 
@@ -331,18 +336,68 @@ def render_html(report: ProcessingReport) -> str:
 <meta charset="utf-8">
 <title>Relatório de Processamento — {_esc(report.project_name)}</title>
 <style>
-body {{ font-family: Arial, sans-serif; margin: 2rem; color: #1a1a1a; }}
-h1 {{ border-bottom: 2px solid #2c6e2f; padding-bottom: 0.3rem; }}
-h2 {{ margin-top: 2rem; color: #2c6e2f; }}
-table {{ border-collapse: collapse; margin: 0.5rem 0 1rem 0; }}
-td, th {{ border: 1px solid #ccc; padding: 4px 10px; text-align: left; }}
-.pending {{ color: #a15c00; font-style: italic; }}
-.section {{ margin-bottom: 2rem; }}
+body {{
+    font-family: "Segoe UI", Arial, sans-serif;
+    margin: 0;
+    padding: 0;
+    color: {theme.TEXT};
+    background-color: {theme.BACKGROUND};
+}}
+.banner {{
+    background-color: {theme.PRIMARY_DARK};
+    color: {theme.BACKGROUND};
+    padding: 1.8rem 3rem;
+}}
+.banner h1 {{
+    margin: 0;
+    color: {theme.BACKGROUND};
+    border-bottom: none;
+}}
+.banner p {{
+    margin: 0.3rem 0 0 0;
+    color: {theme.SURFACE};
+    opacity: 0.85;
+}}
+.content {{
+    padding: 2rem 3rem;
+}}
+h2 {{
+    margin-top: 2.2rem;
+    color: {theme.PRIMARY_DARK};
+    border-left: 5px solid {theme.PRIMARY};
+    padding-left: 0.6rem;
+}}
+h3 {{ color: {theme.PRIMARY}; margin-top: 1.2rem; }}
+table {{ border-collapse: collapse; margin: 0.5rem 0 1rem 0; min-width: 320px; }}
+th {{
+    background-color: {theme.PRIMARY_DARK};
+    color: {theme.BACKGROUND};
+    border: 1px solid {theme.PRIMARY_DARK};
+    padding: 6px 12px;
+    text-align: left;
+}}
+td {{
+    border: 1px solid {theme.BORDER};
+    padding: 6px 12px;
+    text-align: left;
+}}
+tr:nth-child(even) td {{ background-color: {theme.SURFACE}; }}
+.pending {{ color: {theme.PENDING}; font-style: italic; }}
+.section {{
+    margin-bottom: 2rem;
+    padding: 1rem 1.5rem;
+    background-color: {theme.SURFACE};
+    border: 1px solid {theme.BORDER};
+    border-radius: 6px;
+}}
 </style>
 </head>
 <body>
+<div class="banner">
 <h1>Relatório de Processamento — {_esc(report.project_name)}</h1>
 <p>Gerado em: {_esc(report.generated_at)}</p>
+</div>
+<div class="content">
 
 <div class="section">
 <h2>Survey Data</h2>
@@ -439,6 +494,7 @@ td, th {{ border: 1px solid #ccc; padding: 4px 10px; text-align: left; }}
 <ul>{gpu_rows}</ul>
 </div>
 
+</div>
 </body>
 </html>
 """

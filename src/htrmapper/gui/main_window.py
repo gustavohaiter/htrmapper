@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from htrmapper.core import theme
 from htrmapper.core.project import ImageRecord, Project
 from htrmapper.geo.crs import (
     CoordinateReferenceSystem,
@@ -38,6 +39,49 @@ from htrmapper.geo.crs import (
     wgs84,
 )
 from htrmapper.io.image_import import import_folder
+
+_STYLESHEET = f"""
+QMainWindow, QWidget {{
+    background-color: {theme.BACKGROUND};
+    color: {theme.TEXT};
+    font-size: 13px;
+}}
+QLabel#statusLabel {{
+    color: {theme.TEXT_MUTED};
+}}
+QPushButton {{
+    background-color: {theme.PRIMARY_DARK};
+    color: {theme.BACKGROUND};
+    border: none;
+    border-radius: 4px;
+    padding: 6px 14px;
+    font-weight: bold;
+}}
+QPushButton:hover {{
+    background-color: {theme.PRIMARY};
+}}
+QPushButton:pressed {{
+    background-color: {theme.PRIMARY_DARK};
+}}
+QTableWidget {{
+    background-color: {theme.BACKGROUND};
+    alternate-background-color: {theme.SURFACE};
+    gridline-color: {theme.BORDER};
+    border: 1px solid {theme.BORDER};
+    selection-background-color: {theme.PRIMARY};
+    selection-color: {theme.BACKGROUND};
+}}
+QHeaderView::section {{
+    background-color: {theme.PRIMARY_DARK};
+    color: {theme.BACKGROUND};
+    padding: 4px;
+    border: none;
+    font-weight: bold;
+}}
+QSplitter::handle {{
+    background-color: {theme.BORDER};
+}}
+"""
 
 _TABLE_COLUMNS = [
     ("file_name", "File"),
@@ -58,6 +102,7 @@ class MainWindow(QMainWindow):
 
         self.project = project or Project(name="untitled")
 
+        self.setStyleSheet(_STYLESHEET)
         self._build_ui()
         if self.project.images:
             self._refresh(self.project.images)
@@ -72,6 +117,7 @@ class MainWindow(QMainWindow):
         open_button.clicked.connect(self._on_import_clicked)
         toolbar.addWidget(open_button)
         self.status_label = QLabel("Nenhum projeto carregado.")
+        self.status_label.setObjectName("statusLabel")
         toolbar.addWidget(self.status_label)
         toolbar.addStretch(1)
         root_layout.addLayout(toolbar)
@@ -83,6 +129,7 @@ class MainWindow(QMainWindow):
         self.table.setColumnCount(len(_TABLE_COLUMNS))
         self.table.setHorizontalHeaderLabels([label for _, label in _TABLE_COLUMNS])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.setAlternatingRowColors(True)
         splitter.addWidget(self.table)
 
         # Matplotlib is an optional GUI-extra dependency; imported lazily so
@@ -90,9 +137,10 @@ class MainWindow(QMainWindow):
         from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
         from matplotlib.figure import Figure
 
-        self.figure = Figure(figsize=(5, 5))
+        self.figure = Figure(figsize=(5, 5), facecolor=theme.BACKGROUND)
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.axes = self.figure.add_subplot(111)
+        self.axes.set_facecolor(theme.BACKGROUND)
         splitter.addWidget(self.canvas)
         splitter.setSizes([650, 450])
 
@@ -148,13 +196,19 @@ class MainWindow(QMainWindow):
             labels.append(record.file_name)
 
         self.axes.clear()
+        self.axes.set_facecolor(theme.BACKGROUND)
         if xs:
-            self.axes.scatter(xs, ys, c="tab:green", s=30, edgecolors="black", linewidths=0.5)
+            self.axes.scatter(
+                xs, ys, c=theme.PRIMARY, s=30, edgecolors=theme.PRIMARY_DARK, linewidths=0.6
+            )
             self.axes.set_aspect("equal", adjustable="datalim")
-        self.axes.set_xlabel(f"Este (m) — EPSG:{self.project.crs.project_epsg}")
-        self.axes.set_ylabel("Norte (m)")
-        self.axes.set_title(f"Posições das câmeras ({len(xs)} válidas)")
-        self.axes.grid(True, linewidth=0.3)
+        self.axes.set_xlabel(f"Este (m) — EPSG:{self.project.crs.project_epsg}", color=theme.PRIMARY_DARK)
+        self.axes.set_ylabel("Norte (m)", color=theme.PRIMARY_DARK)
+        self.axes.set_title(f"Posições das câmeras ({len(xs)} válidas)", color=theme.PRIMARY_DARK)
+        self.axes.tick_params(colors=theme.TEXT_MUTED)
+        for spine in self.axes.spines.values():
+            spine.set_color(theme.BORDER)
+        self.axes.grid(True, linewidth=0.3, color=theme.BORDER)
         self.canvas.draw_idle()
 
 
