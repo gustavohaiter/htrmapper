@@ -719,3 +719,127 @@ ou DEM de entrada não existem.
   dos Processing Parameters.
 - CLI: `htrmapper ortho <projeto.json> --output <ortho.tif> [--feather-fraction N]`
   (requer Fase 4 e Fase 5 já executadas). GUI: botão "Gerar Ortomosaico…".
+
+## 19. Fase 7 — interface completa (implementada e validada)
+
+Substitui a janela de página única das Fases 1-6 por uma árvore de projeto
+(`Projeto / Imagens / Câmeras / Tie Points / Point Cloud / DEM /
+Orthomosaic`, exatamente como pedido no briefing original), com três
+capacidades novas que o briefing também pede explicitamente: progresso das
+etapas de longa duração, cancelamento, e monitoramento de CPU/RAM/GPU/VRAM.
+
+### Execução em segundo plano (`gui.worker.PipelineWorker`)
+
+Toda etapa de longa duração (Alinhar, Ajustar, Nuvem densa, DEM,
+Ortomosaico) passa a rodar numa `QThread` dedicada em vez de bloquear o
+event loop do Qt -- a árvore, os botões e o monitor de hardware continuam
+respondendo durante todo o processamento. `PipelineWorker` inspeciona a
+assinatura da função-alvo (`inspect.signature`) para decidir, por etapa,
+se ela aceita `cancellation_token`/`progress_callback`, em vez de assumir
+que toda função aceita -- a Fase 3 (ajuste GNSS) não declara esses
+parâmetros porque o `Ceres::Solve` usado por
+`pycolmap.create_pose_prior_bundle_adjuster` não expõe nenhum gancho de
+cancelamento nesta versão do pycolmap, então a GUI simplesmente não mostra
+um botão Cancelar para essa etapa -- nunca um botão decorativo que não
+faz nada.
+
+### Cancelamento real (`pycolmap.CancellationToken`)
+
+Cada função de pipeline que o COLMAP já suporta nativamente
+(`extract_features`, `match_spatial`/`match_exhaustive`,
+`incremental_mapping`, `undistort_images`, `patch_match_stereo`,
+`stereo_fusion`) passou a aceitar um parâmetro opcional
+`cancellation_token: pycolmap.CancellationToken`, repassado diretamente à
+chamada pycolmap correspondente -- confirmado empiricamente (não apenas
+assumido pela documentação) que um token já cancelado faz essas chamadas
+levantarem `InterruptedError` imediatamente. O laço de reprojeção por
+câmera do Ortomosaico (Fase 6, código próprio, não COLMAP) reaproveita o
+mesmo `CancellationToken` como uma flag thread-safe barata, checando
+`.is_cancelled` a cada câmera. A geração de DEM (Fase 5, numpy/scipy puro,
+sem chamada COLMAP nenhuma) aceita qualquer objeto com uma propriedade
+`is_cancelled` (duck typing) e checa entre as fases (carregar, filtrar,
+interpolar, escrever) -- cancelamento apenas nas fronteiras de fase, nunca
+fabricado como granularidade fina que a computação não tem. Em todos os
+casos, cancelado levanta `InterruptedError`, nunca mascarado como um erro
+genérico de pipeline -- é assim que o worker distingui "cancelado" de
+"falhou" (`worker.cancelled` vs. `worker.failed`).
+
+### Progresso real, não fabricado
+
+`progress_callback` segue o mesmo princípio: para as etapas apoiadas no
+COLMAP, só progresso por fase (rótulos como "Extraindo features (SIFT)",
+"Reconstrução incremental (SfM)") é reportado, porque a API de alto nível
+do COLMAP não expõe percentual de conclusão dentro dessas chamadas -- uma
+barra de progresso indeterminada (spinner) é o que a GUI mostra para essas
+etapas, nunca uma porcentagem inventada. Para o Ortomosaico (laço próprio,
+por câmera), progresso real e granular (`câmeras_processadas/total`) é
+reportado a cada câmera -- uma barra de progresso determinada de verdade,
+porque aqui o código realmente sabe quanto falta.
+
+### Monitor de CPU/RAM/GPU/VRAM ao vivo (`core.system_info.sample_live_usage`)
+
+Amostra `psutil.cpu_percent()`/`psutil.virtual_memory()` (leitura direta
+de `/proc`, sem subprocess) e `nvidia-smi --query-gpu=...` (utilização e
+VRAM) a cada 1 segundo via `QTimer`. Sem GPU NVIDIA, mostra "sem GPU
+NVIDIA" -- nunca "0% de uso", que confundiria "não medido" com "medido,
+ocioso" (mesmo princípio de nunca fabricar um valor para o que não foi
+calculado, já usado no `core.report`).
+
+### Achado da Fase 7: nunca chamar subprocess durante uma etapa de pipeline em segundo plano
+
+Testando o monitor de hardware junto com um worker de Alinhamento (SfM)
+rodando em segundo plano, uma suspensão real e reproduzível apareceu: o
+monitor chamando `nvidia-smi` (via `subprocess.run`, que no Linux usa
+`fork()`) exatamente enquanto o COLMAP tinha várias threads nativas ativas
+(extração SIFT paralela) travou o processo inteiro. Esse é o clássico
+problema de `fork()` num processo multi-thread: um lock que outra thread
+segurava no instante do fork é copiado para o processo filho já "travado",
+mas a thread que o liberaria não existe mais lá -- o filho (e quem espera
+por ele) pode travar para sempre. A correção: `sample_cpu_ram_usage()`
+(sem nenhum subprocess) é usada enquanto qualquer worker de pipeline está
+ativo neste processo (contador global, não por-janela, já que `fork()`
+afeta o processo inteiro); a amostragem de GPU via `nvidia-smi` só volta a
+rodar quando nenhum worker está ativo. Confirmado que essa suspensão
+específica não era o problema real de um segundo achado nesta mesma
+investigação -- ver abaixo -- mas é uma correção real e válida por conta
+própria, mantida por ser engenharia sólida (nunca fazer fork de um
+processo pesadamente multi-thread por uma amostragem periódica opcional).
+
+### Achado da Fase 7: ordem de atualização de estado após um worker terminar
+
+A investigação acima revelou uma trava real diferente: `QMessageBox.exec()`
+(o diálogo modal "Alinhamento concluído") bloqueia esperando um clique que
+nunca chega num teste automatizado/headless -- não é um bug (um usuário
+real clica normalmente), apenas algo que todo teste de UI Qt precisa
+simular (o teste correspondente faz `monkeypatch` de `QMessageBox.exec`
+para aceitar automaticamente). Investigar esse bloqueio, porém, expôs um
+bug real: `_end_worker()` chamava `_sync_ui_to_project_state()` (que
+decide todo botão habilitado/desabilitado e todo painel atualizado) ANTES
+de `on_success(result)` gravar o resultado em `self.project` -- então
+"Ajustar (GNSS)" continuava desabilitado mesmo depois do Alinhamento (SfM)
+terminar com sucesso, porque a sincronização da UI rodava contra o estado
+antigo do projeto. Corrigido invertendo a ordem: `on_success` grava o
+resultado primeiro, só then a sincronização final da UI roda. Um teste
+(`test_align_worker_updates_project_and_ui`) prova especificamente que o
+botão "Ajustar (GNSS)" fica habilitado após um Alinhamento real terminar,
+não apenas que a chamada não lança exceção.
+
+### Validação
+
+`tests/test_cancellation_and_progress.py`: um token já cancelado levanta
+`InterruptedError` real (não simulado) para SfM, Ortomosaico e DEM;
+callbacks de progresso disparam nas fases/contagens esperadas, em ordem.
+`tests/test_gui_main_window.py`: roda com o plugin de plataforma Qt
+"offscreen" (sem display real necessário); constrói a janela, navega pela
+árvore, importa imagens sintéticas, executa um Alinhamento (SfM) real em
+segundo plano até o fim via um event loop Qt local (não um mock), e
+confirma que `self.project.sfm` foi preenchido e os botões corretos foram
+habilitados -- não apenas "não lançou exceção". Também confirma que o
+Ajuste (GNSS) não oferece Cancelar (sem gancho de cancelamento nativo) e
+que os painéis de DEM/Ortomosaico renderizam uma prévia raster real sem
+travar.
+
+- `core.system_info`: `sample_live_usage()`/`sample_cpu_ram_usage()`
+  (Fase 7, monitor ao vivo) somam-se a `detect_system_info()` (Fase 1,
+  descrição estática de hardware para o relatório).
+- GUI: `gui/worker.py` (novo), `gui/main_window.py` (reescrito).

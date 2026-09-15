@@ -27,6 +27,7 @@ reimplemented here. What this module does that is specific to HTRMapper:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -139,6 +140,7 @@ def _extract_features_for_group(
     group_name: str,
     group_images: list[ImageRecord],
     config: SfmConfig,
+    cancellation_token: "pycolmap.CancellationToken | None" = None,
 ) -> CameraGroupResult:
     image_names = [Path(img.path).name for img in group_images]
 
@@ -155,6 +157,7 @@ def _extract_features_for_group(
             reader_options=reader_options,
             extraction_options=config.extraction_options(),
             device=config.device(),
+            cancellation_token=cancellation_token,
         )
         return CameraGroupResult(
             camera_model=group_name,
@@ -176,24 +179,35 @@ def _extract_features_for_group(
             camera_mode=pycolmap.CameraMode.SINGLE,
             extraction_options=config.extraction_options(),
             device=config.device(),
+            cancellation_token=cancellation_token,
         )
         return CameraGroupResult(
             camera_model=group_name, num_images=len(group_images), intrinsics_source="colmap_auto_exif"
         )
 
 
-def _run_matching(database_path: Path, images: list[ImageRecord], config: SfmConfig) -> str:
+def _run_matching(
+    database_path: Path,
+    images: list[ImageRecord],
+    config: SfmConfig,
+    cancellation_token: "pycolmap.CancellationToken | None" = None,
+) -> str:
     num_positioned = sum(1 for img in images if img.position_valid)
     if num_positioned >= MIN_IMAGES_FOR_SPATIAL_MATCHING:
         pairing_options = pycolmap.SpatialPairingOptions()
         pairing_options.max_num_neighbors = config.spatial_max_neighbors
         pairing_options.max_distance = config.spatial_max_distance_m
         pycolmap.match_spatial(
-            database_path=database_path, pairing_options=pairing_options, device=config.device()
+            database_path=database_path,
+            pairing_options=pairing_options,
+            device=config.device(),
+            cancellation_token=cancellation_token,
         )
         return "spatial (restricted by GNSS position)"
 
-    pycolmap.match_exhaustive(database_path=database_path, device=config.device())
+    pycolmap.match_exhaustive(
+        database_path=database_path, device=config.device(), cancellation_token=cancellation_token
+    )
     return (
         f"exhaustive (only {num_positioned} image(s) with valid GNSS position, "
         f"below the {MIN_IMAGES_FOR_SPATIAL_MATCHING} needed for spatial matching)"
@@ -244,7 +258,13 @@ def _georeference(
     return True, f"aligned to EPSG:{project_crs_epsg} using {len(tgt_names)} GNSS-positioned camera(s)"
 
 
-def run_structure_from_motion(project: Project, workdir: Path, config: SfmConfig | None = None) -> SfmResult:
+def run_structure_from_motion(
+    project: Project,
+    workdir: Path,
+    config: SfmConfig | None = None,
+    cancellation_token: "pycolmap.CancellationToken | None" = None,
+    progress_callback: "Callable[[str], None] | None" = None,
+) -> SfmResult:
     """Run feature extraction, matching, and incremental SfM for a project.
 
     Raises SfmError if the pipeline cannot even start (e.g. no images, or
@@ -252,8 +272,23 @@ def run_structure_from_motion(project: Project, workdir: Path, config: SfmConfig
     partially aligns is NOT an error -- it is reported in SfmResult with
     the unregistered image names, per the project's "never hide failures,
     say exactly why" rule.
+
+    `cancellation_token` (a `pycolmap.CancellationToken`) is checked by
+    COLMAP itself between major steps of feature extraction, matching, and
+    incremental mapping; if cancelled, the underlying pycolmap call raises
+    `InterruptedError`, which propagates here uncaught (never masked as a
+    generic `SfmError`) so a caller can tell "cancelled" apart from "failed".
+    `progress_callback`, when given, is called with a short phase label
+    before each major step -- COLMAP's own high-level API does not expose
+    a finer-grained (e.g. percent-complete) progress hook for these steps,
+    so this is coarse, phase-level progress, never a fabricated percentage.
     """
     config = config or SfmConfig()
+
+    def _report(phase: str) -> None:
+        if progress_callback is not None:
+            progress_callback(phase)
+
     images = project.images
     if not images:
         raise SfmError("project has no imported images; run import before alignment")
@@ -271,18 +306,24 @@ def run_structure_from_motion(project: Project, workdir: Path, config: SfmConfig
 
     result = SfmResult(num_images_input=len(images), database_path=str(database_path))
 
+    _report("Extraindo features (SIFT)")
     for group_name, group_images in groups.items():
-        group_result = _extract_features_for_group(database_path, image_root, group_name, group_images, config)
+        group_result = _extract_features_for_group(
+            database_path, image_root, group_name, group_images, config, cancellation_token
+        )
         result.camera_groups.append(group_result)
 
-    result.matching_strategy = _run_matching(database_path, images, config)
+    _report("Buscando pares candidatos (matching)")
+    result.matching_strategy = _run_matching(database_path, images, config, cancellation_token)
 
+    _report("Reconstrução incremental (SfM)")
     pipeline_options = pycolmap.IncrementalPipelineOptions()
     reconstructions = pycolmap.incremental_mapping(
         database_path=database_path,
         image_path=image_root,
         output_path=sparse_path,
         options=pipeline_options,
+        cancellation_token=cancellation_token,
     )
 
     if not reconstructions:
@@ -302,6 +343,7 @@ def run_structure_from_motion(project: Project, workdir: Path, config: SfmConfig
     result.num_observations = primary.compute_num_observations()
     result.mean_reprojection_error_px = primary.compute_mean_reprojection_error()
 
+    _report("Georreferenciando (alinhamento ao GNSS)")
     images_by_name = {Path(img.path).name: img for img in images}
     result.georeferenced, result.georeferencing_note = _georeference(primary, images_by_name, project.crs.project_epsg)
 

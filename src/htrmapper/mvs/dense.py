@@ -22,6 +22,7 @@ CPU MVS implementation.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -119,6 +120,8 @@ def run_dense_reconstruction(
     image_root: Path,
     workdir: Path,
     config: MvsConfig | None = None,
+    cancellation_token: "pycolmap.CancellationToken | None" = None,
+    progress_callback: "Callable[[str], None] | None" = None,
 ) -> MvsResult:
     """Run undistortion + patch-match stereo + fusion to produce a dense,
     colored, georeferenced point cloud.
@@ -126,11 +129,20 @@ def run_dense_reconstruction(
     Raises MvsError if no CUDA/HIP GPU is available (see module docstring)
     or if the input reconstruction/images cannot be found -- these are
     "cannot even start" conditions, never silently downgraded.
+
+    `cancellation_token`/`progress_callback`: see the equivalent parameters
+    on `sfm.pipeline.run_structure_from_motion` -- same contract (coarse,
+    phase-level progress; a cancelled token surfaces as `InterruptedError`,
+    raised by pycolmap itself, never masked as `MvsError`).
     """
     config = config or MvsConfig()
     reconstruction_path = Path(reconstruction_path)
     image_root = Path(image_root)
     workdir = Path(workdir)
+
+    def _report(phase: str) -> None:
+        if progress_callback is not None:
+            progress_callback(phase)
 
     if not reconstruction_path.exists():
         raise MvsError(f"reconstruction not found at {reconstruction_path}")
@@ -147,10 +159,12 @@ def run_dense_reconstruction(
     dense_workspace = workdir / "dense"
     dense_workspace.mkdir(parents=True, exist_ok=True)
 
+    _report("Desdistorcendo imagens")
     pycolmap.undistort_images(
         output_path=dense_workspace,
         input_path=reconstruction_path,
         image_path=image_root,
+        cancellation_token=cancellation_token,
     )
 
     preset = _QUALITY_PRESETS[config.quality]
@@ -160,19 +174,25 @@ def run_dense_reconstruction(
     options.num_samples = preset["num_samples"]
     options.geom_consistency = preset["geom_consistency"]
 
-    pycolmap.patch_match_stereo(workspace_path=dense_workspace, options=options)
+    _report("Patch-match stereo (GPU)")
+    pycolmap.patch_match_stereo(
+        workspace_path=dense_workspace, options=options, cancellation_token=cancellation_token
+    )
 
     input_type = "geometric" if preset["geom_consistency"] else "photometric"
     fused_path = workdir / "fused.ply"
     fusion_options = pycolmap.StereoFusionOptions()
+    _report("Fusão estéreo")
     dense_reconstruction = pycolmap.stereo_fusion(
         output_path=fused_path,
         workspace_path=dense_workspace,
         input_type=input_type,
         options=fusion_options,
+        cancellation_token=cancellation_token,
     )
 
     las_path = workdir / "dense_point_cloud.las"
+    _report("Exportando nuvem de pontos (LAS)")
     _export_to_las(dense_reconstruction, project.crs.project_epsg, las_path)
 
     return MvsResult(

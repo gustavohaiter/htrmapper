@@ -8,7 +8,7 @@ arquitetura, bibliotecas, riscos e o plano de fases.
 Foco atual do usuário: DJI Mavic 3M, imagens já geotaggeadas via PPK,
 SIRGAS 2000 / UTM 23S (EPSG:31983), agricultura sem GCP.
 
-## Status: Fase 1 + 2 + 3 + 4 + 5 + 6 (importação → SfM → ajuste GNSS → nuvem densa → DEM → ortomosaico)
+## Status: Fase 1 + 2 + 3 + 4 + 5 + 6 + 7 (importação → SfM → ajuste GNSS → nuvem densa → DEM → ortomosaico → interface completa)
 
 Implementado nesta fase:
 
@@ -83,6 +83,21 @@ Implementado nesta fase:
   fixture de teste compartilhada, sem afetar as fases anteriores. CLI:
   `htrmapper ortho`. GUI: botão "Gerar Ortomosaico…". Ver
   `ARCHITECTURE.md` seção 18.
+- **Fase 7** (interface completa): árvore de projeto (Projeto / Imagens /
+  Câmeras / Tie Points / Point Cloud / DEM / Orthomosaic). Cada etapa de
+  longa duração (Alinhar, Ajustar, Nuvem densa, DEM, Ortomosaico) roda em
+  segundo plano (`QThread`) em vez de travar a interface, com barra de
+  progresso (real, nunca uma porcentagem inventada — indeterminada para
+  as etapas apoiadas no COLMAP, que não expõe percentual; determinada e
+  granular no Ortomosaico, que é código próprio por-câmera) e um botão
+  Cancelar que interrompe de verdade via `pycolmap.CancellationToken` —
+  quando a etapa suporta cancelamento nativo; a Fase 3 (ajuste GNSS) não
+  oferece Cancelar porque o solver do Ceres não expõe esse gancho nesta
+  versão do pycolmap, nunca um botão decorativo. Monitor de CPU/RAM/GPU/
+  VRAM ao vivo (atualizado a cada segundo). Testando essas duas coisas
+  juntas expôs e corrigiu um deadlock real de `fork()` (chamar
+  `nvidia-smi` enquanto o COLMAP tem várias threads nativas ativas). GUI:
+  `htrmapper-gui`. Ver `ARCHITECTURE.md` seção 19.
 
 ## Instalação (desenvolvimento)
 
@@ -127,7 +142,9 @@ pasta do projeto) — ele ativa o `.venv` automaticamente antes de chamar
 
 Toda a suíte usa dados sintéticos (JPEGs com EXIF + XMP DJI fabricados em
 tempo de execução) — nenhum dado real de drone é necessário para rodar os
-testes:
+testes. Os testes da GUI (Fase 7) rodam com o plugin de plataforma Qt
+"offscreen" (`QT_QPA_PLATFORM=offscreen`, já configurado no próprio
+arquivo de teste) — não é preciso um display real nem X11/Wayland:
 
 ```bash
 pytest -q
@@ -135,6 +152,6 @@ pytest -q
 
 ## Próximas fases
 
-Ver `ARCHITECTURE.md`, seção "Priorização do desenvolvimento": Fase 7
-(interface completa), Fase 8 (validação quantitativa contra o
-Metashape), Fase 9 (otimização de performance/GPU).
+Ver `ARCHITECTURE.md`, seção "Priorização do desenvolvimento": Fase 8
+(validação quantitativa contra o Metashape), Fase 9 (otimização de
+performance/GPU).

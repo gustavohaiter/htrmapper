@@ -21,8 +21,10 @@ implemented here either.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import laspy
 import numpy as np
@@ -127,18 +129,40 @@ def run_dem_generation(
     project_epsg: int,
     output_path: Path,
     config: DemConfig | None = None,
+    cancellation_token: Any = None,
+    progress_callback: "Callable[[str], None] | None" = None,
 ) -> DemResult:
-    """Rasterize a dense point cloud (LAS) into a georeferenced DSM GeoTIFF."""
+    """Rasterize a dense point cloud (LAS) into a georeferenced DSM GeoTIFF.
+
+    Unlike the COLMAP-backed phases, there is no native cancellation hook
+    here (this is plain numpy/scipy/rasterio code) -- `cancellation_token`
+    (anything exposing an `is_cancelled` property, so the same
+    `pycolmap.CancellationToken` used elsewhere can be reused as a simple
+    thread-safe flag) is only checked between the phases below, never
+    mid-computation, and raises `InterruptedError` when set, matching
+    pycolmap's own convention for a cancelled operation.
+    `progress_callback`, when given, is called with a short phase label
+    before each phase -- real phase-boundary progress, not a fabricated
+    smooth percentage (this pipeline has no meaningful finer granularity).
+    """
     config = config or DemConfig()
     las_path = Path(las_path)
     if not las_path.exists():
         raise DemError(f"point cloud not found at {las_path}")
 
+    def _report(phase: str) -> None:
+        if cancellation_token is not None and cancellation_token.is_cancelled:
+            raise InterruptedError("Operation cancelled")
+        if progress_callback is not None:
+            progress_callback(phase)
+
+    _report("Carregando nuvem de pontos (LAS)")
     x, y, z = _load_points(las_path)
     num_points_input = len(x)
 
     num_filtered = 0
     if config.filter_outliers:
+        _report("Filtrando outliers (mediana + MAD)")
         x, y, z, num_filtered = _filter_outliers(x, y, z)
         if len(x) < 3:
             raise DemError(
@@ -169,6 +193,7 @@ def run_dem_generation(
     # sparse gaps linear interpolation can't reach) -- the "interpolação
     # + preenchimento de buracos" the project brief asks for, without
     # extrapolating with an unconstrained method.
+    _report("Interpolando grade (linear + preenchimento de buracos)")
     grid_z = griddata((x, y), z, (grid_x, grid_y), method="linear")
     nan_mask = np.isnan(grid_z)
     if nan_mask.any():
@@ -177,6 +202,7 @@ def run_dem_generation(
     transform = from_origin(min_x, max_y, resolution_m, resolution_m)
     crs_wkt = CoordinateReferenceSystem(project_epsg).to_wkt()
 
+    _report("Escrevendo GeoTIFF")
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with rasterio.open(

@@ -36,6 +36,7 @@ implemented here.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -150,6 +151,8 @@ def run_orthomosaic_generation(
     dem_path: Path,
     output_path: Path,
     config: OrthoConfig | None = None,
+    cancellation_token: "pycolmap.CancellationToken | None" = None,
+    progress_callback: "Callable[[int, int], None] | None" = None,
 ) -> OrthoResult:
     """Generate a georeferenced RGBA orthomosaic GeoTIFF.
 
@@ -157,6 +160,15 @@ def run_orthomosaic_generation(
     Phase 4's `pycolmap.undistort_images` wrote (undistorted images +
     matching PINHOLE-model reconstruction) -- never the original distorted
     images, since sampling here does not itself correct for distortion.
+
+    Unlike the COLMAP-backed phases, the per-camera reprojection loop below
+    is this project's own code, so real, fine-grained progress is possible
+    (never fabricated): `progress_callback`, when given, is called with
+    `(cameras_done, cameras_total)` after each camera is processed.
+    `cancellation_token` (a `pycolmap.CancellationToken`, reused here purely
+    as a cheap thread-safe flag -- no pycolmap call is made in this loop)
+    is checked once per camera; if cancelled, raises `InterruptedError` to
+    match pycolmap's own convention for a cancelled operation.
     """
     config = config or OrthoConfig()
     reconstruction_path = Path(reconstruction_path)
@@ -190,10 +202,16 @@ def run_orthomosaic_generation(
     world_points = np.stack([flat_x, flat_y, flat_z], axis=1)
 
     num_cameras_used = 0
-    for image_id in registered_ids:
+    num_cameras_total = len(registered_ids)
+    for camera_index, image_id in enumerate(registered_ids, start=1):
+        if cancellation_token is not None and cancellation_token.is_cancelled:
+            raise InterruptedError("Operation cancelled")
+
         image = reconstruction.image(image_id)
         image_path = undistorted_image_path / image.name
         if not image_path.exists():
+            if progress_callback is not None:
+                progress_callback(camera_index, num_cameras_total)
             continue
         camera = image.camera
 
@@ -209,6 +227,8 @@ def run_orthomosaic_generation(
             & (v <= camera.height - 1)
         )
         if not np.any(valid):
+            if progress_callback is not None:
+                progress_callback(camera_index, num_cameras_total)
             continue
 
         src_image = np.asarray(PILImage.open(image_path).convert("RGB"))
@@ -221,6 +241,9 @@ def run_orthomosaic_generation(
         np.add.at(color_accum, (rows, cols), colors[valid] * weights[valid, None])
         np.add.at(weight_accum, (rows, cols), weights[valid])
         num_cameras_used += 1
+
+        if progress_callback is not None:
+            progress_callback(camera_index, num_cameras_total)
 
     has_data = weight_accum > 0
     rgb = np.zeros((height_px, width_px, 3), dtype=np.uint8)
