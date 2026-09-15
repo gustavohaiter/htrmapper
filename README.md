@@ -8,7 +8,7 @@ arquitetura, bibliotecas, riscos e o plano de fases.
 Foco atual do usuário: DJI Mavic 3M, imagens já geotaggeadas via PPK,
 SIRGAS 2000 / UTM 23S (EPSG:31983), agricultura sem GCP.
 
-## Status: Fase 1 + 2 + 3 + 4 + 5 (importação → SfM → ajuste GNSS → nuvem densa → DEM)
+## Status: Fase 1 + 2 + 3 + 4 + 5 + 6 (importação → SfM → ajuste GNSS → nuvem densa → DEM → ortomosaico)
 
 Implementado nesta fase:
 
@@ -71,6 +71,18 @@ Implementado nesta fase:
   conhecida: erro médio < 15cm, erro máximo < 50cm comparado ao valor
   real da função de terreno, não apenas "rodou sem erro". CLI:
   `htrmapper dem`. GUI: botão "Gerar DEM…". Ver `ARCHITECTURE.md` seção 17.
+- **Fase 6** (ortomosaico — **2.5D**, não true-ortho 3D completo, ver
+  `ARCHITECTURE.md`): reprojeta as imagens não-distorcidas da Fase 4 no
+  plano do DEM da Fase 5, reaproveitando o próprio modelo de câmera do
+  COLMAP (`cam_from_world`/`img_from_cam`), com blending por
+  distância-à-borda ("feathering") entre câmeras sobrepostas. Saída
+  GeoTIFF RGBA (alpha = NoData explícito onde nenhuma câmera viu o
+  terreno). Validado contra cores de terreno conhecidas de uma cena
+  sintética com posições de câmera exatas (erro médio de cor < 8/255) —
+  processo que expôs e corrigiu um bug real de convenção norte-sul na
+  fixture de teste compartilhada, sem afetar as fases anteriores. CLI:
+  `htrmapper ortho`. GUI: botão "Gerar Ortomosaico…". Ver
+  `ARCHITECTURE.md` seção 18.
 
 ## Instalação (desenvolvimento)
 
@@ -96,6 +108,8 @@ htrmapper adjust projeto.json --workdir ./work_ba
 htrmapper dense projeto.json --workdir ./work_dense --quality media
 
 htrmapper dem projeto.json --output dem.tif
+
+htrmapper ortho projeto.json --output ortho.tif
 ```
 
 ## Uso — GUI
@@ -121,6 +135,6 @@ pytest -q
 
 ## Próximas fases
 
-Ver `ARCHITECTURE.md`, seção "Priorização do desenvolvimento": Fase 6
-(ortomosaico), Fase 7 (interface completa), Fase 8 (validação
-quantitativa contra o Metashape), Fase 9 (otimização de performance/GPU).
+Ver `ARCHITECTURE.md`, seção "Priorização do desenvolvimento": Fase 7
+(interface completa), Fase 8 (validação quantitativa contra o
+Metashape), Fase 9 (otimização de performance/GPU).

@@ -7,13 +7,14 @@ import sys
 from pathlib import Path
 
 from htrmapper.ba.weighted_bundle_adjustment import BaConfig, BaError, run_gnss_weighted_bundle_adjustment
-from htrmapper.core.project import DemSummary, GnssAccuracyConfig, MvsSummary, Project, ProjectCrsConfig
+from htrmapper.core.project import DemSummary, GnssAccuracyConfig, MvsSummary, OrthoSummary, Project, ProjectCrsConfig
 from htrmapper.core.report import build_report_from_project, render_html
 from htrmapper.dem.generation import DemConfig, DemError, run_dem_generation
 from htrmapper.geo.crs import CoordinateReferenceSystem
 from htrmapper.gnss.accuracy import CameraAccuracy
 from htrmapper.io.image_import import import_folder
 from htrmapper.mvs.dense import MvsConfig, MvsError, run_dense_reconstruction
+from htrmapper.ortho.orthomosaic import OrthoConfig, OrthoError, run_orthomosaic_generation
 from htrmapper.sfm.pipeline import SfmConfig, SfmError, run_structure_from_motion
 
 
@@ -204,6 +205,8 @@ def _cmd_dense(args: argparse.Namespace) -> int:
         quality=result.quality,
         point_cloud_las_path=result.point_cloud_las_path,
         point_cloud_native_path=result.point_cloud_native_path,
+        undistorted_image_path=result.undistorted_image_path,
+        undistorted_reconstruction_path=result.undistorted_reconstruction_path,
     )
     project.save(project_path)
     print(f"\nProject updated: {project_path}")
@@ -254,6 +257,59 @@ def _cmd_dem(args: argparse.Namespace) -> int:
         num_points_used=result.num_points_used,
         num_points_filtered_as_outliers=result.num_points_filtered_as_outliers,
         point_density_per_m2=result.point_density_per_m2,
+    )
+    project.save(project_path)
+    print(f"\nProject updated: {project_path}")
+
+    return 0
+
+
+def _cmd_ortho(args: argparse.Namespace) -> int:
+    project_path = Path(args.project)
+    if not project_path.is_file():
+        print(f"error: project file not found: {project_path}", file=sys.stderr)
+        return 1
+
+    project = Project.load(project_path)
+    if project.mvs is None or not project.mvs.undistorted_reconstruction_path:
+        print("error: project has no Fase 4 (dense) result; run 'htrmapper dense' first", file=sys.stderr)
+        return 1
+    if project.dem is None or not project.dem.raster_path:
+        print("error: project has no Fase 5 (DEM) result; run 'htrmapper dem' first", file=sys.stderr)
+        return 1
+
+    config = OrthoConfig(feather_fraction=args.feather_fraction)
+
+    print(f"Orthomosaic generation for project: {project.name}")
+    print(f"Reconstruction (undistorted): {project.mvs.undistorted_reconstruction_path}")
+    print(f"DEM: {project.dem.raster_path}")
+    print()
+
+    try:
+        result = run_orthomosaic_generation(
+            Path(project.mvs.undistorted_reconstruction_path),
+            Path(project.mvs.undistorted_image_path),
+            Path(project.dem.raster_path),
+            Path(args.output),
+            config,
+        )
+    except OrthoError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Size: {result.width_px} x {result.height_px} px ({result.resolution_m:.4f} m/px)")
+    print(f"Cameras used: {result.num_cameras_used}")
+    print(f"Valid pixels: {result.num_valid_pixels} ({result.num_nodata_pixels} nodata)")
+    print(f"GeoTIFF: {result.raster_path}")
+
+    project.ortho = OrthoSummary(
+        raster_path=result.raster_path,
+        width_px=result.width_px,
+        height_px=result.height_px,
+        resolution_m=result.resolution_m,
+        num_cameras_used=result.num_cameras_used,
+        num_valid_pixels=result.num_valid_pixels,
+        num_nodata_pixels=result.num_nodata_pixels,
     )
     project.save(project_path)
     print(f"\nProject updated: {project_path}")
@@ -321,6 +377,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-filter", action="store_true", help="Disable outlier filtering (MAD-based) before rasterization"
     )
     dem_parser.set_defaults(func=_cmd_dem)
+
+    ortho_parser = subparsers.add_parser(
+        "ortho", help="Fase 6: geração de ortomosaico ('htrmapper dense' e 'htrmapper dem' primeiro)"
+    )
+    ortho_parser.add_argument("project", help="Path to a project .json file with Fase 4 (dense) and Fase 5 (DEM) results")
+    ortho_parser.add_argument("--output", required=True, help="Path for the output RGBA GeoTIFF")
+    ortho_parser.add_argument(
+        "--feather-fraction",
+        type=float,
+        default=0.1,
+        help="Edge-feathering width as a fraction of image size, in (0, 0.5] (default: 0.1)",
+    )
+    ortho_parser.set_defaults(func=_cmd_ortho)
 
     return parser
 

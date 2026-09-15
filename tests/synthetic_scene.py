@@ -24,6 +24,7 @@ import random
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 from PIL import Image, ImageDraw
 
 from htrmapper.geo.crs import GeodeticTransformer, ProjectedPoint, sirgas2000_utm23s, wgs84
@@ -106,6 +107,26 @@ class SyntheticFlightSpec:
         return self.image_height_px * self.gsd_m_per_px
 
 
+def generate_smooth_gradient_terrain(size_px: int, seed: int = 0) -> Image.Image:
+    """A smoothly-varying (low spatial frequency) terrain texture, for
+    tests that check color/geometric fidelity of resampling (e.g. the
+    orthomosaic pipeline) rather than feature matching. The random-shape
+    texture from `generate_textured_terrain` is deliberately
+    high-frequency (good for SIFT, the opposite of what a color-fidelity
+    check wants): with real-world shape sizes comparable to a single
+    output pixel's GSD, even a correct pipeline's sub-pixel resampling
+    differences shift which shape gets sampled, dominating any color
+    comparison with noise unrelated to whether the geometry is right. A
+    smooth gradient has no such high-frequency content, so a color
+    mismatch there actually indicates a geometric/sampling problem.
+    """
+    xs, ys = np.meshgrid(np.arange(size_px), np.arange(size_px))
+    r = (128 + 100 * np.sin(xs / 300.0)).astype(np.uint8)
+    g = (128 + 100 * np.sin(ys / 260.0)).astype(np.uint8)
+    b = (128 + 60 * np.sin((xs + ys) / 400.0)).astype(np.uint8)
+    return Image.fromarray(np.stack([r, g, b], axis=-1), mode="RGB")
+
+
 def _camera_grid_positions(spec: SyntheticFlightSpec) -> list[tuple[float, float]]:
     along_spacing_m = spec.footprint_height_m * (1.0 - spec.front_overlap)
     cross_spacing_m = spec.footprint_width_m * (1.0 - spec.side_overlap)
@@ -122,7 +143,7 @@ def _camera_grid_positions(spec: SyntheticFlightSpec) -> list[tuple[float, float
 def _render_nadir_crop(terrain: Image.Image, spec: SyntheticFlightSpec, x_m: float, y_m: float) -> Image.Image:
     terrain_w, terrain_h = terrain.size
     center_px_x = terrain_w / 2.0 + x_m * TEXTURE_PX_PER_METER
-    center_px_y = terrain_h / 2.0 + y_m * TEXTURE_PX_PER_METER
+    center_px_y = terrain_h / 2.0 - y_m * TEXTURE_PX_PER_METER
 
     crop_w_px = spec.footprint_width_m * TEXTURE_PX_PER_METER
     crop_h_px = spec.footprint_height_m * TEXTURE_PX_PER_METER
@@ -212,3 +233,67 @@ def generate_synthetic_flight(
         )
 
     return truths
+
+
+def build_ground_truth_reconstruction(spec: SyntheticFlightSpec, truths: list[SyntheticCameraTruth]):
+    """Build a `pycolmap.Reconstruction` with exact, known camera poses and
+    intrinsics matching how `generate_synthetic_flight` rendered its
+    images -- bypassing SfM entirely.
+
+    This exists because SfM on a perfectly flat, nadir-only, constant-
+    altitude synthetic flight is a genuinely degenerate configuration for
+    *pose* recovery, not just the focal-length/intrinsics degeneracy
+    already documented for Fase 3: with no out-of-plane parallax, a
+    reflected ("upside-down") vertical solution can fit the same GNSS
+    camera-center positions just as well as the true one, discovered
+    while validating Fase 6. Real flights (varying altitude/attitude,
+    non-planar terrain) don't have this issue -- it is specific to this
+    deliberately simple synthetic fixture, and is why later-phase tests
+    that need a *correct* reconstruction (not a test of SfM itself) build
+    one directly here instead of re-deriving it from SfM.
+
+    Camera convention: COLMAP images look down the camera's +Z axis, with
+    +X right and +Y down in the image. For a right-handed camera frame
+    with +X aligned to world east and +Z aligned to the downward viewing
+    direction (world -Z), the right-hand rule (X x Y = Z) forces +Y to
+    align with world *south*, not north -- so a physically valid nadir
+    camera (proper rotation, determinant +1) shows north at the top of
+    the image (smaller row index). This is `diag(1, -1, -1)`: world
+    (dx, dy, dz) -> camera (dx, -dy, -dz). `_render_nadir_crop` renders
+    consistently with this convention (larger `y_m`, i.e. further north,
+    maps to a smaller row index in the source texture crop).
+    """
+    import numpy as np
+    import pycolmap
+
+    fx = spec.image_width_px * spec.focal_length_mm / spec.sensor_width_mm
+    reconstruction = pycolmap.Reconstruction()
+    camera = pycolmap.Camera.create_from_model_id(
+        1, pycolmap.CameraModelId.PINHOLE, fx, spec.image_width_px, spec.image_height_px
+    )
+    reconstruction.add_camera_with_trivial_rig(camera)
+
+    rotation = np.diag([1.0, -1.0, -1.0])
+
+    for i, truth in enumerate(truths, start=1):
+        image = pycolmap.Image()
+        image.image_id = i
+        image.camera_id = 1
+        image.name = truth.file_name
+        reconstruction.add_image_with_trivial_frame(image)
+
+        center = np.array(
+            [
+                spec.origin_x_m + truth.x_m,
+                spec.origin_y_m + truth.y_m,
+                spec.terrain_elevation_m + truth.altitude_agl_m,
+            ]
+        )
+        translation = -rotation @ center
+        cam_from_world = pycolmap.Rigid3d(pycolmap.Rotation3d(rotation), translation)
+
+        frame = reconstruction.frame(i)
+        frame.set_cam_from_world(1, cam_from_world)
+        reconstruction.register_frame(i)
+
+    return reconstruction

@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 
 from htrmapper.ba.weighted_bundle_adjustment import BaConfig, BaError, run_gnss_weighted_bundle_adjustment
 from htrmapper.core import theme
-from htrmapper.core.project import DemSummary, ImageRecord, MvsSummary, Project
+from htrmapper.core.project import DemSummary, ImageRecord, MvsSummary, OrthoSummary, Project
 from htrmapper.core.report import build_report_from_project, render_html
 from htrmapper.dem.generation import DemConfig, DemError, run_dem_generation
 from htrmapper.geo.crs import (
@@ -45,6 +45,7 @@ from htrmapper.geo.crs import (
 )
 from htrmapper.io.image_import import import_folder
 from htrmapper.mvs.dense import MvsConfig, MvsError, run_dense_reconstruction
+from htrmapper.ortho.orthomosaic import OrthoConfig, OrthoError, run_orthomosaic_generation
 from htrmapper.sfm.pipeline import SfmConfig, SfmError, run_structure_from_motion
 
 _STYLESHEET = f"""
@@ -161,6 +162,11 @@ class MainWindow(QMainWindow):
         self.dem_button.setEnabled(False)
         self.dem_button.clicked.connect(self._on_dem_clicked)
         toolbar.addWidget(self.dem_button)
+
+        self.ortho_button = QPushButton("Gerar Ortomosaico…")
+        self.ortho_button.setEnabled(False)
+        self.ortho_button.clicked.connect(self._on_ortho_clicked)
+        toolbar.addWidget(self.ortho_button)
 
         self.status_label = QLabel("Nenhum projeto carregado.")
         self.status_label.setObjectName("statusLabel")
@@ -379,6 +385,8 @@ class MainWindow(QMainWindow):
             quality=result.quality,
             point_cloud_las_path=result.point_cloud_las_path,
             point_cloud_native_path=result.point_cloud_native_path,
+            undistorted_image_path=result.undistorted_image_path,
+            undistorted_reconstruction_path=result.undistorted_reconstruction_path,
         )
 
         QMessageBox.information(
@@ -452,6 +460,58 @@ class MainWindow(QMainWindow):
             f"GeoTIFF: {result.raster_path}",
         )
         self.status_label.setText(f"{len(self.project.images)} imagem(ns) carregada(s). DEM gerado.")
+        self.ortho_button.setEnabled(True)
+
+    def _on_ortho_clicked(self) -> None:
+        if self.project.mvs is None or not self.project.mvs.undistorted_reconstruction_path:
+            QMessageBox.warning(self, "Ortomosaico", "Gere a nuvem densa primeiro.")
+            return
+        if self.project.dem is None or not self.project.dem.raster_path:
+            QMessageBox.warning(self, "Ortomosaico", "Gere o DEM primeiro.")
+            return
+
+        output_path, _ = QFileDialog.getSaveFileName(
+            self, "Salvar ortomosaico", f"{self.project.name}_ortho.tif", "GeoTIFF (*.tif)"
+        )
+        if not output_path:
+            return
+
+        self.setCursor(Qt.CursorShape.WaitCursor)
+        self.status_label.setText("Gerando ortomosaico (reprojeção + blending)... isso pode demorar.")
+        QApplication.processEvents()
+        try:
+            result = run_orthomosaic_generation(
+                Path(self.project.mvs.undistorted_reconstruction_path),
+                Path(self.project.mvs.undistorted_image_path),
+                Path(self.project.dem.raster_path),
+                Path(output_path),
+                OrthoConfig(),
+            )
+        except OrthoError as exc:
+            self.unsetCursor()
+            QMessageBox.critical(self, "Falha no ortomosaico", str(exc))
+            return
+        finally:
+            self.unsetCursor()
+
+        self.project.ortho = OrthoSummary(
+            raster_path=result.raster_path,
+            width_px=result.width_px,
+            height_px=result.height_px,
+            resolution_m=result.resolution_m,
+            num_cameras_used=result.num_cameras_used,
+            num_valid_pixels=result.num_valid_pixels,
+            num_nodata_pixels=result.num_nodata_pixels,
+        )
+
+        QMessageBox.information(
+            self,
+            "Ortomosaico gerado",
+            f"{result.width_px}x{result.height_px}px, resolução {result.resolution_m:.3f} m/px.\n"
+            f"Câmeras usadas: {result.num_cameras_used}.\n"
+            f"GeoTIFF: {result.raster_path}",
+        )
+        self.status_label.setText(f"{len(self.project.images)} imagem(ns) carregada(s). Ortomosaico gerado.")
 
     def _refresh(self, records: list[ImageRecord]) -> None:
         self.status_label.setText(f"{len(records)} imagem(ns) carregada(s).")

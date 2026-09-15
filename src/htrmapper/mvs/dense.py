@@ -76,6 +76,7 @@ class MvsResult:
     point_cloud_las_path: str = ""
     point_cloud_native_path: str = ""
     undistorted_image_path: str = ""
+    undistorted_reconstruction_path: str = ""
 
 
 def _export_to_las(reconstruction: "pycolmap.Reconstruction", project_epsg: int, las_path: Path) -> None:
@@ -179,5 +180,12 @@ def run_dense_reconstruction(
         quality=config.quality,
         point_cloud_las_path=str(las_path),
         point_cloud_native_path=str(fused_path),
-        undistorted_image_path=str(dense_workspace),
+        # `undistort_images` writes the undistorted images and their
+        # matching PINHOLE-model reconstruction into these fixed
+        # subfolders of the workspace -- both are needed, unmodified, by
+        # Phase 6's orthorectification (it samples colors from these exact
+        # images and must use the exact reconstruction that matches them,
+        # never the original distorted images/sparse reconstruction).
+        undistorted_image_path=str(dense_workspace / "images"),
+        undistorted_reconstruction_path=str(dense_workspace / "sparse"),
     )

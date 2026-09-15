@@ -617,3 +617,105 @@ injetados como erro grosseiro.
   densa) e o campo DEM dos Processing Parameters.
 - CLI: `htrmapper dem <projeto.json> --output <dem.tif> [--resolution N] [--no-filter]`.
   GUI: botão "Gerar DEM…".
+
+## 18. Fase 6 — geração de ortomosaico (implementada e validada)
+
+**Isto é ortorretificação 2.5D, não true-ortho 3D completo** — declarado
+explicitamente no docstring do módulo, conforme a regra do projeto contra
+superestimar precisão. Para cada pixel de saída, a altura do terreno vem
+do DEM por-pixel (Fase 5), então relevo de terreno é tratado corretamente
+(diferente do "plano médio único" que o briefing original explicitamente
+alerta contra). O que **não** é feito: teste de visibilidade/oclusão
+por-pixel (z-buffer) contra toda a cena — um objeto alto entre uma câmera
+e um ponto mais baixo próximo ainda pode se projetar incorretamente sobre
+o pixel desse ponto mais baixo ("vazamento"/duplo-mapeamento ao redor de
+feições verticais). É exatamente essa checagem de visibilidade completa
+que separa um true-ortho 3D de verdade (ray-casting com teste de
+visibilidade por pixel) do que está implementado aqui.
+
+Construído reaproveitando diretamente o modelo de câmera do próprio
+COLMAP (`Image.cam_from_world()`, `Camera.img_from_cam()` — a mesma
+projeção usada no erro de reprojeção em todo o projeto), amostrando das
+imagens **não-distorcidas** que a etapa `pycolmap.undistort_images` da
+Fase 4 já produziu (assim a amostragem nunca precisa lidar com distorção
+de lente separadamente). Nenhuma matemática de câmera própria, nenhuma
+I/O de raster própria (`rasterio`/GDAL) — conforme a decisão de
+arquitetura de construir sobre bibliotecas maduras.
+
+- `ortho.orthomosaic.run_orthomosaic_generation`:
+  1. Carrega a grade do DEM (coordenadas de mundo por pixel via os
+     coeficientes do transform afim diretamente — não
+     `rasterio.transform.xy`, que não preserva a forma de arrays 2D).
+  2. Para cada câmera registrada da reconstrução: projeta todos os pontos
+     3D válidos do terreno (`cam_from_world()` seguido de `img_from_cam(...,
+     check_cheirality=True)`), filtra por NaN (pontos atrás da câmera) e
+     por limites da imagem, e amostra a cor por interpolação bilinear.
+  3. **Blending por distância-à-borda ("feathering")**: cada câmera
+     contribui um voto ponderado por pixel de saída, com peso decrescendo
+     linearmente perto da borda da imagem-fonte — assim a costura entre
+     duas imagens sobrepostas suaviza em vez de mostrar uma borda dura.
+     Otimização de linha de costura por graph-cut (o que ferramentas
+     comerciais maduras usam para evitar misturar através de objetos em
+     movimento/erros de paralaxe) não está implementada.
+  4. Escreve um GeoTIFF **RGBA** (4 bandas, uint8) via `rasterio`: pixels
+     sem nenhuma câmera contribuinte ficam com alpha=0 (NoData), nunca com
+     uma cor "inventada" ou escondidos.
+
+### Achado da Fase 6: bug de convenção de câmera na cena sintética de teste
+
+A validação da Fase 6 expôs um bug real, pré-existente, na fixture de
+teste compartilhada (`tests/synthetic_scene.py`), não no código de
+produção. O renderizador `_render_nadir_crop` usava um sinal de mapeamento
+linha/coluna que produzia imagens espelhadas norte-sul em relação a uma
+câmera pinhole física real. Isso nunca afetou os testes das Fases 2-5
+porque eles só validam **posição** do centro de câmera após SfM +
+alinhamento por similaridade ao GNSS (uma operação insensível a essa
+convenção de orientação/mão), nunca a orientação absoluta.
+
+O bug só apareceu ao construir, para a Fase 6, uma reconstrução de
+"verdade de campo" manualmente (via
+`add_camera_with_trivial_rig`/`add_image_with_trivial_frame`/
+`Frame.set_cam_from_world`/`Reconstruction.register_frame`) — necessário
+porque SfM real sobre a cena sintética plana, nadir-only e de altitude
+constante do projeto é uma configuração genuinamente degenerada para a
+recuperação de **pose absoluta** (achado distinto da degenerescência de
+autocalibração de intrínsecos já documentada na Fase 3, mas com a mesma
+raiz: "plano + só-nadir + altitude constante"). Ao derivar a rotação
+correta para essa reconstrução manual (regra da mão direita: câmera
+right-handed com X=leste e Z=direção-de-visada-para-baixo implica
+Y=**sul**, não norte — logo uma câmera nadir fisicamente válida mostra
+norte no topo da imagem), ficou evidente que o renderizador da fixture
+não seguia essa convenção. Usar a rotação fisicamente correta
+(`diag(1, -1, -1)`, determinante +1) contra o renderizador com o sinal
+antigo produzia uma matriz de rotação **inválida** (reflexão, determinante
+-1) quando "corrigida" para combinar com o bug do renderizador —
+`pycolmap.Rotation3d` aceita silenciosamente uma matriz de reflexão e
+produz um quaternion não-normalizado corrompido, sem lançar erro,
+corrompendo toda a geometria a jusante (`projection_center()` com sinal
+errado, projeções "válidas" que na verdade eram lixo). Corrigido em
+ambos os lugares: o sinal do renderizador (`_render_nadir_crop`) e a
+rotação da reconstrução manual, restaurando a convenção fisicamente
+correta em toda a fixture. Nenhum teste das Fases 2-5 foi afetado pela
+correção (suíte completa re-executada e confirmada sem regressão).
+
+### Validação com verdade de campo conhecida
+
+Cena sintética com posições de câmera **exatas** e conhecidas (sem
+depender de SfM, pelo motivo de degenerescência acima), terreno de
+textura suave (baixa frequência espacial) para isolar corretude
+geométrica de ruído de sub-pixel, e DEM plano sintético com margem além
+da cobertura das câmeras. Validado: cor reconstruída no ortomosaico
+contra a cor **verdadeira** conhecida do terreno em dezenas de posições
+aleatórias dentro da área coberta (erro médio < 8 em valor de canal de
+cor, 0-255); pixels fora de toda cobertura de câmera corretamente
+marcados NoData (alpha=0); rejeição de configuração inválida
+(`feather_fraction` fora de (0, 0.5]); erros claros quando reconstrução
+ou DEM de entrada não existem.
+
+- `core.project`: novo `OrthoSummary` (raster_path, dimensões, resolução,
+  câmeras usadas, pixels válidos/NoData).
+- `core.report`: quando `project.ortho` existe, preenche a seção
+  "Orthomosaic" (tamanho, sistema de coordenadas) e o campo Orthomosaic
+  dos Processing Parameters.
+- CLI: `htrmapper ortho <projeto.json> --output <ortho.tif> [--feather-fraction N]`
+  (requer Fase 4 e Fase 5 já executadas). GUI: botão "Gerar Ortomosaico…".

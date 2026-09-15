@@ -194,6 +194,8 @@ class MvsSummary:
     quality: str = ""
     point_cloud_las_path: str = ""
     point_cloud_native_path: str = ""
+    undistorted_image_path: str = ""
+    undistorted_reconstruction_path: str = ""
     ran_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
     def to_dict(self) -> dict:
@@ -229,6 +231,27 @@ class DemSummary:
 
 
 @dataclass
+class OrthoSummary:
+    """Persisted summary of a Phase 6 (orthomosaic) run."""
+
+    raster_path: str = ""
+    width_px: int = 0
+    height_px: int = 0
+    resolution_m: float = 0.0
+    num_cameras_used: int = 0
+    num_valid_pixels: int = 0
+    num_nodata_pixels: int = 0
+    ran_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "OrthoSummary":
+        return cls(**data)
+
+
+@dataclass
 class Project:
     """Top-level project state, serializable to/from a JSON project file."""
 
@@ -242,6 +265,7 @@ class Project:
     ba: BaSummary | None = None
     mvs: MvsSummary | None = None
     dem: DemSummary | None = None
+    ortho: OrthoSummary | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -255,6 +279,7 @@ class Project:
             "ba": self.ba.to_dict() if self.ba else None,
             "mvs": self.mvs.to_dict() if self.mvs else None,
             "dem": self.dem.to_dict() if self.dem else None,
+            "ortho": self.ortho.to_dict() if self.ortho else None,
         }
 
     @classmethod
@@ -269,6 +294,7 @@ class Project:
         ba_data = data.get("ba")
         mvs_data = data.get("mvs")
         dem_data = data.get("dem")
+        ortho_data = data.get("ortho")
         return cls(
             name=data["name"],
             created_at=data.get("created_at", datetime.now().isoformat()),
@@ -280,6 +306,7 @@ class Project:
             mvs=MvsSummary.from_dict(mvs_data) if mvs_data else None,
             ba=BaSummary.from_dict(ba_data) if ba_data else None,
             dem=DemSummary.from_dict(dem_data) if dem_data else None,
+            ortho=OrthoSummary.from_dict(ortho_data) if ortho_data else None,
         )
 
     def save(self, path: Path) -> None:

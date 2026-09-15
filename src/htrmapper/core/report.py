@@ -400,6 +400,19 @@ def build_report_from_project(project: Project) -> ProcessingReport:
             )
         )
 
+    orthomosaic = Orthomosaic()
+    if project.ortho is not None:
+        ortho_summary = project.ortho
+        orthomosaic.size = Metric(value=f"{ortho_summary.width_px} x {ortho_summary.height_px} px")
+        orthomosaic.coordinate_system = Metric(value=f"EPSG:{project.crs.project_epsg}")
+        params.orthomosaic_section = Metric(
+            value=(
+                f"{ortho_summary.width_px}x{ortho_summary.height_px}px, resolução "
+                f"{ortho_summary.resolution_m:.3f} m/px, {ortho_summary.num_cameras_used} câmera(s) usada(s), "
+                f"{ortho_summary.num_nodata_pixels} pixel(s) sem cobertura (NoData)"
+            )
+        )
+
     return ProcessingReport(
         project_name=project.name,
         survey_data=survey,
@@ -408,6 +421,7 @@ def build_report_from_project(project: Project) -> ProcessingReport:
         camera_locations=camera_locations,
         camera_calibration=camera_calibration,
         dem=dem,
+        orthomosaic=orthomosaic,
     )
 
 
