@@ -81,7 +81,7 @@ def _cmd_align(args: argparse.Namespace) -> int:
         return 1
 
     workdir = Path(args.workdir)
-    config = SfmConfig(key_point_limit=args.key_point_limit)
+    config = SfmConfig(key_point_limit=args.key_point_limit, max_image_size=args.max_image_size)
 
     print(f"Aligning project: {project.name} ({len(project.images)} images)")
     print(f"Work directory: {workdir}")
@@ -340,6 +340,17 @@ def build_parser() -> argparse.ArgumentParser:
     align_parser.add_argument("--workdir", required=True, help="Directory for the COLMAP database/reconstruction")
     align_parser.add_argument(
         "--key-point-limit", type=int, default=40_000, help="Max SIFT features per image (default: 40000)"
+    )
+    align_parser.add_argument(
+        "--max-image-size",
+        type=int,
+        default=2000,
+        help=(
+            "Longest image dimension fed to SIFT extraction, in pixels; -1 disables downscaling "
+            "(default: 2000 -- see ARCHITECTURE.md's Fase 2 performance finding for why this value, "
+            "not a rounder-looking one, is the one that actually engages downscaling). Real-resolution "
+            "aerial photos (20+ MP) processed at native size make per-pair feature matching extremely slow."
+        ),
     )
     align_parser.set_defaults(func=_cmd_align)
 

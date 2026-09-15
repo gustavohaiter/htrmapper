@@ -111,3 +111,73 @@ def test_raises_on_empty_project(tmp_path: Path):
 
     with pytest.raises(SfmError):
         run_structure_from_motion(project, tmp_path / "work")
+
+
+def test_sfm_config_extraction_options_carries_max_image_size():
+    assert SfmConfig().extraction_options().max_image_size == 2000
+    assert SfmConfig(max_image_size=-1).extraction_options().max_image_size == -1
+    assert SfmConfig(max_image_size=1600).extraction_options().max_image_size == 1600
+
+
+def test_default_max_image_size_meaningfully_reduces_features_on_a_large_image(tmp_path: Path):
+    """Regression test for a real performance bug found on a user's actual
+    56-photo, 21MP (5280x3956) flight: feature matching took minutes per
+    image pair instead of seconds. Root cause: `SfmConfig` never set
+    `max_image_size`, so pycolmap's own default (-1, no downscaling)
+    extracted SIFT at full native resolution -- COLMAP's own log even
+    warns about this ("Consider reducing the maximum image size"). This
+    test proves the fix actually changes behavior, at the resolution that
+    matters (measured against elapsed time, not feature count -- an
+    earlier version of this test compared feature counts on random noise
+    and was itself wrong: noise is adversarial for a scale-space detector,
+    so its keypoint count does not vary monotonically with the requested
+    max size, unlike real photographic content; elapsed extraction time is
+    the reliable, monotonic signal for "how many pixels did this actually
+    process").
+
+    It also guards a second, easy-to-repeat mistake: COLMAP's CPU SIFT
+    extractor only actually resamples when the requested size crosses one
+    of its internal pyramid ("octave") boundaries, power-of-2 steps from
+    the native resolution -- a value that looks like a reasonable
+    reduction (e.g. 3200 from a 5280px-wide photo, ~1.65x) can measure
+    byte-for-byte identical to no limit at all, a silent no-op. This test
+    uses the project's own real 5280px-wide drone photo resolution (from a
+    real 56-photo user flight) specifically so a future "reasonable but
+    ineffective" value regresses here instead of only in the field."""
+    import sqlite3
+    import time
+
+    import numpy as np
+    import pycolmap
+    from PIL import Image
+
+    rng = np.random.default_rng(0)
+    pixels = rng.integers(0, 255, size=(3956, 5280, 3), dtype=np.uint8)
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    Image.fromarray(pixels).save(image_dir / "big.jpg", quality=95)
+
+    def _extract_and_time(max_image_size: int) -> float:
+        db_path = tmp_path / f"db_{max_image_size}.sqlite"
+        options = pycolmap.FeatureExtractionOptions()
+        options.max_image_size = max_image_size
+        options.num_threads = 1  # deterministic timing, not a wall-clock race against other cores
+        start = time.time()
+        pycolmap.extract_features(
+            database_path=db_path, image_path=image_dir, image_names=["big.jpg"],
+            camera_mode=pycolmap.CameraMode.SINGLE, extraction_options=options, device=pycolmap.Device.cpu,
+        )
+        elapsed = time.time() - start
+        con = sqlite3.connect(db_path)
+        (num_features,) = con.execute("select rows from keypoints").fetchone()
+        con.close()
+        assert num_features > 0  # sanity: extraction actually ran, not silently skipped
+        return elapsed
+
+    config = SfmConfig()
+    assert config.max_image_size == 2000  # the fixed, validated default -- never -1 again by accident
+
+    elapsed_default = _extract_and_time(config.max_image_size)
+    elapsed_native = _extract_and_time(-1)
+
+    assert elapsed_default < elapsed_native * 0.7

@@ -41,6 +41,31 @@ from htrmapper.sfm.camera_model import InsufficientExifError, derive_initial_int
 logger = logging.getLogger(__name__)
 
 DEFAULT_KEY_POINT_LIMIT = 40_000
+# pycolmap's own `FeatureExtractionOptions.max_image_size` defaults to -1
+# (no downscaling) -- for a real drone image (e.g. 5280x3956, ~21MP) this
+# extracts SIFT at full native resolution, and COLMAP's default
+# `first_octave=-1` upsamples 2x on top of that before detecting, i.e.
+# effectively processing at ~10560x7912. Combined with `max_num_features`
+# being a soft cap rather than a hard one (confirmed empirically: capping
+# at 40000 on a real-resolution, texture-rich image still returned ~43000
+# keypoints in testing -- COLMAP allocates the budget per octave and can
+# overshoot the total), this made real per-image feature counts run to
+# 60000-75000+ on real aerial photos, and per-pair matching cost (which
+# scales worse than linearly with feature count) become the dominant
+# runtime cost -- minutes per image pair instead of seconds, discovered
+# from a real user run on 56 real 21MP photos.
+#
+# 2000px, not the 3200px used by Fase 4's "alta" MVS quality tier: COLMAP's
+# CPU SIFT extractor only actually resamples the image when the requested
+# size crosses one of its internal pyramid ("octave") boundaries, which are
+# power-of-2 steps from the native resolution -- confirmed empirically by
+# timing extraction at several `max_image_size` values on a real-resolution
+# (5280px-wide) test image: 3200 (a ~1.65x reduction from 5280, short of an
+# octave boundary) measured byte-for-byte IDENTICAL time and feature count
+# to no limit at all (a silent no-op), while 2000 (~2.6x, past the first
+# boundary) cut extraction time by more than half. Reusing the MVS
+# convention here would have looked reasonable while quietly doing nothing.
+DEFAULT_MAX_IMAGE_SIZE = 2000
 MIN_IMAGES_FOR_SPATIAL_MATCHING = 3
 MIN_IMAGES_FOR_GEOREFERENCING = 3
 
@@ -48,6 +73,7 @@ MIN_IMAGES_FOR_GEOREFERENCING = 3
 @dataclass
 class SfmConfig:
     key_point_limit: int = DEFAULT_KEY_POINT_LIMIT
+    max_image_size: int = DEFAULT_MAX_IMAGE_SIZE  # -1 = no downscaling (native resolution)
     spatial_max_neighbors: int = 50
     spatial_max_distance_m: float = 150.0
     use_gpu: bool | None = None  # None = auto-detect (pycolmap.has_cuda)
@@ -59,6 +85,7 @@ class SfmConfig:
 
     def extraction_options(self) -> "pycolmap.FeatureExtractionOptions":
         options = pycolmap.FeatureExtractionOptions()
+        options.max_image_size = self.max_image_size
         options.sift.max_num_features = self.key_point_limit
         return options
 

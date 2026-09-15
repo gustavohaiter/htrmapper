@@ -182,6 +182,7 @@ def _render_camera_position_map_png(
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import ScalarFormatter
 
     fig, ax = plt.subplots(figsize=(5, 5), dpi=110, facecolor=theme.BACKGROUND)
     ax.set_facecolor(theme.BACKGROUND)
@@ -192,6 +193,15 @@ def _render_camera_position_map_png(
     ax.set_xlabel(f"Este (m) — EPSG:{project_epsg}", color=theme.PRIMARY_DARK)
     ax.set_ylabel("Norte (m)", color=theme.PRIMARY_DARK)
     ax.set_title(f"Posições das câmeras ({len(points_xy)})", color=theme.PRIMARY_DARK)
+    # Same fix as the GUI's camera plot (gui.main_window._plot_points):
+    # UTM coordinates are 6-7 digit numbers matplotlib would otherwise
+    # collapse into a small "+7.548e6" offset plus short relative ticks,
+    # hiding the real coordinate value.
+    for axis in (ax.xaxis, ax.yaxis):
+        formatter = ScalarFormatter(useOffset=False)
+        formatter.set_scientific(False)
+        axis.set_major_formatter(formatter)
+    ax.tick_params(axis="y", labelrotation=90)
     ax.tick_params(colors=theme.TEXT_MUTED)
     for spine in ax.spines.values():
         spine.set_color(theme.BORDER)

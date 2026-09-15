@@ -1010,6 +1010,8 @@ class MainWindow(QMainWindow):
         self._plot_points(xs, ys, f"Posições das câmeras — {label} ({len(xs)} registradas)")
 
     def _plot_points(self, xs: list[float], ys: list[float], title: str) -> None:
+        from matplotlib.ticker import ScalarFormatter
+
         self.cameras_axes.clear()
         self.cameras_axes.set_facecolor(theme.BACKGROUND)
         if xs:
@@ -1020,10 +1022,22 @@ class MainWindow(QMainWindow):
         self.cameras_axes.set_xlabel(f"Este (m) — EPSG:{self.project.crs.project_epsg}", color=theme.PRIMARY_DARK)
         self.cameras_axes.set_ylabel("Norte (m)", color=theme.PRIMARY_DARK)
         self.cameras_axes.set_title(title, color=theme.PRIMARY_DARK)
+        # UTM coordinates (easting/northing) are 6-7 digit numbers -- by
+        # default matplotlib shows them as a small offset ("+7.548e6") plus
+        # short relative tick labels, which hides the real coordinate
+        # value. Show the real, full number on every tick instead (never a
+        # value the user can't read off directly), rotated vertically so
+        # those wider labels don't eat into the plot area.
+        for axis in (self.cameras_axes.xaxis, self.cameras_axes.yaxis):
+            formatter = ScalarFormatter(useOffset=False)
+            formatter.set_scientific(False)
+            axis.set_major_formatter(formatter)
+        self.cameras_axes.tick_params(axis="y", labelrotation=90)
         self.cameras_axes.tick_params(colors=theme.TEXT_MUTED)
         for spine in self.cameras_axes.spines.values():
             spine.set_color(theme.BORDER)
         self.cameras_axes.grid(True, linewidth=0.3, color=theme.BORDER)
+        self.cameras_figure.tight_layout()
         self.cameras_canvas.draw_idle()
 
     def _preview_raster(self, raster_path: str, axes, canvas, mode: str, max_preview_px: int = 1500) -> None:

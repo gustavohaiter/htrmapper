@@ -911,3 +911,54 @@ geométrica/GNSS em si (pesos, CRS de trabalho, convenção de câmera) --
 essas já tinham sido validadas com dados sintéticos de verdade de campo
 conhecida em cada fase própria. Suíte completa (agora com os testes de
 regressão acima) re-executada sem regressão.
+
+## 20. Achados da primeira execução real (56 fotos reais, 21MP, Mavic 3M)
+
+A primeira execução do pipeline com dados reais do usuário (não mais
+sintéticos) expôs dois problemas que nenhum teste com imagens sintéticas
+pequenas (320x240) poderia revelar -- ambos corrigidos:
+
+1. **Eixos do gráfico de posições de câmera ilegíveis**: coordenadas UTM
+   (6-7 dígitos) faziam o matplotlib mostrar um offset pequeno
+   ("+7.548e6") com marcações relativas curtas embaixo -- a coordenada
+   real nunca aparecia diretamente. Corrigido em `gui.main_window._plot_points`
+   e `core.report._render_camera_position_map_png` (o mesmo gráfico
+   aparece nos dois lugares) para mostrar o número completo em cada
+   marcação, sem notação científica, giradas na vertical para não ocupar
+   espaço horizontal excessivo.
+2. **Alinhamento (SfM) extremamente lento em fotos reais**: no relato do
+   usuário, o matching de um único par de imagens chegou a levar mais de
+   5 minutos, com fotos individuais reportando 60000-75000 features SIFT
+   -- bem acima do limite de 40000 configurado. Investigação e correção
+   completas:
+   - `sfm.pipeline.SfmConfig` nunca configurava
+     `FeatureExtractionOptions.max_image_size` (o padrão do próprio
+     pycolmap é -1, sem redução de resolução) -- então imagens reais de
+     ~21MP (5280x3956) eram processadas em resolução nativa. O próprio log
+     do COLMAP já avisa disso ("Consider reducing the maximum image
+     size...").
+   - **Achado mais sutil, verificado empiricamente antes de corrigir**: o
+     extrator SIFT em CPU do COLMAP só de fato reamostra a imagem quando o
+     tamanho pedido cruza uma fronteira de "oitava" da pirâmide interna
+     (passos de potência de 2 a partir da resolução nativa). Testado
+     diretamente em imagem de 5280px de largura: `max_image_size=3200`
+     (redução de ~1.65x) mediu tempo e contagem de features **idênticos**
+     a nenhum limite -- um no-op silencioso. Só a partir de reduções que
+     cruzam essa fronteira (`max_image_size=2000`, testado e confirmado)
+     o tempo de extração caiu de fato (mais da metade, no teste). Por
+     isso o padrão escolhido é 2000, não um valor "redondo" como 3200
+     (que aliás é o mesmo já usado na Fase 4 para a nuvem densa, onde essa
+     mesma armadilha não se aplica da mesma forma).
+   - `max_num_features` também se confirmou um limite aproximado, não
+     rígido: em teste controlado, configurar 40000 ainda retornou ~43000
+     features numa imagem de resolução real rica em textura -- o COLMAP
+     distribui o orçamento por oitava e pode passar do total.
+   - CLI: nova flag `htrmapper align --max-image-size` (padrão 2000),
+     simétrica a `--key-point-limit`. GUI usa o mesmo padrão.
+   - Teste de regressão (`tests/test_sfm_pipeline.py`) mede **tempo**, não
+     contagem de features, numa imagem sintética nas dimensões reais
+     (5280x3956) -- contagem de features em ruído aleatório se mostrou não
+     monotônica em função do tamanho (ruído é um caso adversarial para um
+     detector em espaço de escala), então o teste original baseado nisso
+     foi descartado por ser ele mesmo não-confiável, não só o código que
+     testava.

@@ -38,9 +38,13 @@ Implementado nesta fase:
   extração de features SIFT, matching restrito por posição GNSS (com
   fallback exaustivo quando há poucas posições), reconstrução incremental
   e georreferenciamento por alinhamento de similaridade às coordenadas
-  GNSS. CLI: `htrmapper align`. GUI: botão "Alinhar (SfM)…". Ver
-  `ARCHITECTURE.md` seção 13 para detalhes e a validação com dados
-  sintéticos de verdade de campo conhecida.
+  GNSS. Imagens são reduzidas para no máximo 2000px no lado maior antes da
+  extração de features (`--max-image-size`, padrão validado contra fotos
+  reais de 21MP — ver `ARCHITECTURE.md` seção 20 para por que esse valor
+  específico, e não um mais "redondo", é o que realmente funciona). CLI:
+  `htrmapper align`. GUI: botão "Alinhar (SfM)…". Ver `ARCHITECTURE.md`
+  seção 13 para detalhes e a validação com dados sintéticos de verdade de
+  campo conhecida.
 - **Fase 3** (bundle adjustment ponderado por GNSS/PPK — o componente
   central do projeto): refina a reconstrução da Fase 2 usando a posição
   GNSS de cada câmera como observação com peso `1/sigma²` derivado da
