@@ -117,6 +117,20 @@ source .venv/bin/activate
 pip install -e ".[gui,dev]"
 ```
 
+## Windows + GPU real (WSL2) — para a Fase 4 (nuvem densa) e além
+
+O `pip install pycolmap` no Windows não tem suporte a CUDA em nenhuma
+versão — mesmo com uma GPU NVIDIA real na máquina, a Fase 4 (nuvem densa)
+não funciona nativamente no Windows. O caminho recomendado: rodar Fases
+1-3 (Importar/Alinhar/Ajustar) na GUI do Windows normalmente, e Fases 4-6
+(`htrmapper dense`/`dem`/`ortho`) de dentro do WSL2 com `pycolmap-cuda12`
+instalado lá — os caminhos do `projeto.json` são traduzidos
+automaticamente entre os dois lados (Windows ↔ `/mnt/c/...`), sem precisar
+editar nada à mão. Passo a passo completo e a lógica de detecção em
+`ARCHITECTURE.md` seção 23 — **setup ainda não validado em hardware real**
+(este ambiente de desenvolvimento não tem WSL2), precisa ser confirmado
+pelo usuário.
+
 ## Uso — CLI
 
 ```bash

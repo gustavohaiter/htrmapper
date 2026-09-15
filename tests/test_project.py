@@ -4,7 +4,18 @@ from pathlib import Path
 
 import pytest
 
-from htrmapper.core.project import GnssAccuracyConfig, ImageRecord, Project, ProjectCrsConfig, SfmSummary
+import htrmapper.core.platform_paths as platform_paths
+from htrmapper.core.project import (
+    BaSummary,
+    DemSummary,
+    GnssAccuracyConfig,
+    ImageRecord,
+    MvsSummary,
+    OrthoSummary,
+    Project,
+    ProjectCrsConfig,
+    SfmSummary,
+)
 from htrmapper.gnss.accuracy import CameraAccuracy
 
 
@@ -120,3 +131,50 @@ def test_sfm_summary_round_trips(tmp_path: Path):
     assert loaded.sfm.num_registered == 6
     assert loaded.sfm.mean_reprojection_error_px == pytest.approx(0.085)
     assert loaded.sfm.georeferenced is True
+
+
+def test_loading_a_windows_saved_project_under_wsl_translates_every_stored_path(tmp_path: Path, monkeypatch):
+    # Integration test for the Fase 4-6 GPU workflow (see
+    # ARCHITECTURE.md): a project created by the Windows GUI (Fase 1-3)
+    # must be loadable from a WSL2 CLI session (Fase 4-6, where a real
+    # CUDA-enabled pycolmap is available) without the user hand-editing
+    # the JSON. Every path-bearing field across every summary must come
+    # back translated, not just ImageRecord.path.
+    project = Project(
+        name="fazenda_teste",
+        crs=ProjectCrsConfig(source_epsg=4326, project_epsg=31983),
+        images=[
+            ImageRecord(path=r"C:\Users\gustavo.haiter\imagens\DJI_0001.JPG", file_name="DJI_0001.JPG")
+        ],
+    )
+    project.sfm = SfmSummary(
+        database_path=r"C:\Users\gustavo.haiter\work\database.db",
+        reconstruction_path=r"C:\Users\gustavo.haiter\work\sparse",
+    )
+    project.ba = BaSummary(reconstruction_path=r"C:\Users\gustavo.haiter\work_ba\sparse")
+    project.mvs = MvsSummary(
+        point_cloud_las_path=r"C:\Users\gustavo.haiter\work_dense\cloud.las",
+        point_cloud_native_path=r"C:\Users\gustavo.haiter\work_dense\fused.ply",
+        undistorted_image_path=r"C:\Users\gustavo.haiter\work_dense\dense\images",
+        undistorted_reconstruction_path=r"C:\Users\gustavo.haiter\work_dense\dense\sparse",
+    )
+    project.dem = DemSummary(raster_path=r"C:\Users\gustavo.haiter\dem.tif")
+    project.ortho = OrthoSummary(raster_path=r"C:\Users\gustavo.haiter\ortho.tif")
+    out_path = tmp_path / "project.json"
+    project.save(out_path)
+
+    monkeypatch.setattr(platform_paths, "is_running_under_wsl", lambda: True)
+    loaded = Project.load(out_path)
+
+    assert loaded.images[0].path == "/mnt/c/Users/gustavo.haiter/imagens/DJI_0001.JPG"
+    assert loaded.sfm.database_path == "/mnt/c/Users/gustavo.haiter/work/database.db"
+    assert loaded.sfm.reconstruction_path == "/mnt/c/Users/gustavo.haiter/work/sparse"
+    assert loaded.ba.reconstruction_path == "/mnt/c/Users/gustavo.haiter/work_ba/sparse"
+    assert loaded.mvs.point_cloud_las_path == "/mnt/c/Users/gustavo.haiter/work_dense/cloud.las"
+    assert loaded.mvs.point_cloud_native_path == "/mnt/c/Users/gustavo.haiter/work_dense/fused.ply"
+    assert loaded.mvs.undistorted_image_path == "/mnt/c/Users/gustavo.haiter/work_dense/dense/images"
+    assert (
+        loaded.mvs.undistorted_reconstruction_path == "/mnt/c/Users/gustavo.haiter/work_dense/dense/sparse"
+    )
+    assert loaded.dem.raster_path == "/mnt/c/Users/gustavo.haiter/dem.tif"
+    assert loaded.ortho.raster_path == "/mnt/c/Users/gustavo.haiter/ortho.tif"

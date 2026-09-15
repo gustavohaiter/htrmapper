@@ -1054,3 +1054,69 @@ pycolmap-cuda12` funcionaria de verdade com a GPU, para SIFT em GPU e para
 a nuvem densa da Fase 4. Isso não foi implementado nem testado por nós
 (depende do ambiente do próprio usuário), só documentado como o caminho
 correto -- nunca prometemos que funcionaria sem essa mudança de ambiente.
+
+## 23. Workflow Windows + WSL2 (implementado o essencial; setup real ainda não validado por nós)
+
+Decisão de arquitetura: em vez de o HTRMapper "chamar o WSL2 por dentro"
+(subprocess/RPC entre um processo Windows e um processo WSL2 -- complexo,
+e não testável neste ambiente de desenvolvimento, que não tem WSL2 real),
+o desenho aproveita o que o próprio WSL2 já resolve nativamente: ele
+enxerga o disco do Windows em `/mnt/<letra>/...`. O fluxo vira:
+
+1. Fases 1-3 (Importar, Alinhar, Ajustar) na GUI do Windows, normalmente.
+2. Fases 4-6 (`htrmapper dense`/`dem`/`ortho`) rodadas de um terminal
+   dentro do WSL2, com um ambiente Python que tem `pycolmap-cuda12`,
+   apontando para o **mesmo** `projeto.json`.
+
+**Problema técnico resolvido**: o `projeto.json` salvo pelo Windows grava
+caminhos como `C:\Users\...`, que não existem dentro do WSL2 (lá é
+`/mnt/c/Users/...`). Sem tratar isso, o comando de dentro do WSL2 não
+acharia as imagens nem a reconstrução salva antes.
+
+- `core.platform_paths`: detecta se o processo atual está rodando dentro
+  do WSL2 (`WSL_DISTRO_NAME` no ambiente, ou a string "microsoft" em
+  `/proc/version` -- os dois sinais padrão de detecção de WSL, nenhum
+  depende de chamar uma ferramenta externa) e traduz qualquer caminho
+  Windows (`C:\...`) para o equivalente WSL2 (`/mnt/c/...`), e o inverso
+  quando rodando nativamente no Windows. Puro tratamento de string,
+  testável sem WSL2 de verdade (o que só o próprio WSL2 real garante --
+  que o mount `/mnt/<letra>` de fato se comporta como a NVIDIA/Microsoft
+  documentam -- não é responsabilidade deste módulo nem foi validado
+  aqui).
+- Aplicado em todo `from_dict()` de `core.project` que carrega um campo de
+  caminho (`ImageRecord.path`, e os caminhos de banco/reconstrução/nuvem/
+  raster de cada summary de fase) -- então um `projeto.json` salvo no
+  Windows continua funcionando quando `htrmapper dense/dem/ortho` roda de
+  dentro do WSL2, sem o usuário precisar editar o JSON à mão ou
+  reimportar as imagens.
+- Mensagem de erro da Fase 4 (`MvsError`, quando não há CUDA) atualizada
+  para apontar esse caminho explicitamente, em vez de só dizer "sem GPU".
+
+### Setup do WSL2 (passo a passo para o usuário validar -- não testado por nós)
+
+Nada disso pôde ser executado neste ambiente de desenvolvimento (é um
+container Linux comum, sem WSL2). Documentado como o caminho correto, a
+partir da documentação oficial NVIDIA/COLMAP -- precisa ser confirmado
+rodando de verdade na máquina do usuário, mesma regra de "nunca alegar
+validação que não ocorreu" que o projeto já segue para precisão numérica.
+
+1. No Windows (driver NVIDIA normal já instalado, nenhum driver Linux
+   dentro do WSL2): `wsl --install -d Ubuntu` (PowerShell como
+   administrador), reiniciar se pedido.
+2. Dentro do Ubuntu/WSL2: instalar o `cuda-toolkit-13-x` da NVIDIA
+   especificamente (não `sudo apt install cuda` genérico -- isso instala
+   um driver Linux que quebra o stub de GPU do WSL2).
+3. Criar um ambiente Python dentro do WSL2 (`python3 -m venv .venv`),
+   `pip install pycolmap-cuda12` (em vez do `pycolmap` normal) mais as
+   outras dependências do HTRMapper (`laspy`, `rasterio`, `scipy`).
+4. Copiar/clonar o código-fonte do HTRMapper para dentro do WSL2 também
+   (ou acessá-lo direto em `/mnt/c/...`, já que o WSL2 enxerga o disco do
+   Windows) e instalar com `pip install -e .` (sem o extra `[gui]` --
+   dentro do WSL2 só as Fases 4-6 via CLI são necessárias, não a
+   interface gráfica).
+5. Rodar, por exemplo: `htrmapper dense /mnt/c/Users/.../projeto.json
+   --workdir /mnt/c/Users/.../work_dense --quality alta`, apontando
+   `--output`/`--workdir` diretamente em `/mnt/c/...` -- esses são
+   argumentos digitados pelo usuário, não precisam de tradução (só os
+   caminhos que já estavam gravados dentro do `projeto.json` do Windows
+   precisam, e isso o HTRMapper já faz sozinho).

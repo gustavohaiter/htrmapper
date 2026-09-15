@@ -18,7 +18,18 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from htrmapper.core.platform_paths import normalize_path_for_current_platform
 from htrmapper.gnss.accuracy import CameraAccuracy
+
+
+def _normalize_path_fields(data: dict, keys: tuple[str, ...]) -> dict:
+    """Returns `data` with each of `keys` present and non-empty translated
+    to the current platform's path convention (see `platform_paths`) --
+    used by every summary's `from_dict()` so a project file saved on
+    Windows keeps working when a later phase runs from WSL2 (or vice
+    versa), without the caller needing to know which path fields exist."""
+    updates = {k: normalize_path_for_current_platform(data[k]) for k in keys if data.get(k)}
+    return {**data, **updates} if updates else data
 
 SCHEMA_VERSION = 1
 
@@ -81,7 +92,7 @@ class ImageRecord:
 
     @classmethod
     def from_dict(cls, data: dict) -> "ImageRecord":
-        return cls(**data)
+        return cls(**_normalize_path_fields(data, ("path",)))
 
 
 @dataclass
@@ -159,7 +170,7 @@ class SfmSummary:
 
     @classmethod
     def from_dict(cls, data: dict) -> "SfmSummary":
-        return cls(**data)
+        return cls(**_normalize_path_fields(data, ("database_path", "reconstruction_path")))
 
 
 @dataclass
@@ -193,7 +204,7 @@ class BaSummary:
 
     @classmethod
     def from_dict(cls, data: dict) -> "BaSummary":
-        return cls(**data)
+        return cls(**_normalize_path_fields(data, ("reconstruction_path",)))
 
 
 @dataclass
@@ -213,7 +224,17 @@ class MvsSummary:
 
     @classmethod
     def from_dict(cls, data: dict) -> "MvsSummary":
-        return cls(**data)
+        return cls(
+            **_normalize_path_fields(
+                data,
+                (
+                    "point_cloud_las_path",
+                    "point_cloud_native_path",
+                    "undistorted_image_path",
+                    "undistorted_reconstruction_path",
+                ),
+            )
+        )
 
 
 @dataclass
@@ -237,7 +258,7 @@ class DemSummary:
 
     @classmethod
     def from_dict(cls, data: dict) -> "DemSummary":
-        return cls(**data)
+        return cls(**_normalize_path_fields(data, ("raster_path",)))
 
 
 @dataclass
@@ -258,7 +279,7 @@ class OrthoSummary:
 
     @classmethod
     def from_dict(cls, data: dict) -> "OrthoSummary":
-        return cls(**data)
+        return cls(**_normalize_path_fields(data, ("raster_path",)))
 
 
 @dataclass

@@ -152,8 +152,12 @@ def run_dense_reconstruction(
         raise MvsError(
             "Reconstrução densa (patch-match stereo) requer GPU NVIDIA (CUDA) ou AMD (HIP); "
             "nenhuma foi detectada nesta máquina. O COLMAP não possui fallback de CPU nativo "
-            "para essa etapa -- ver ARCHITECTURE.md secão 2/4 (OpenMVS como alternativa externa "
-            "opcional para CPU, ainda não implementada)."
+            "para essa etapa. Se esta máquina tem uma GPU NVIDIA real e você está no Windows: "
+            "o pacote pycolmap instalado via pip não traz suporte a CUDA em nenhuma plataforma "
+            "Windows -- rode esta etapa (htrmapper dense/dem/ortho) de dentro do WSL2, com "
+            "pycolmap-cuda12 instalado lá, apontando para o mesmo projeto.json (os caminhos são "
+            "traduzidos automaticamente); ver ARCHITECTURE.md seções 21-23. Alternativa (não "
+            "implementada ainda): OpenMVS externo para CPU."
         )
 
     dense_workspace = workdir / "dense"
