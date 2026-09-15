@@ -34,8 +34,9 @@ from PySide6.QtWidgets import (
 
 from htrmapper.ba.weighted_bundle_adjustment import BaConfig, BaError, run_gnss_weighted_bundle_adjustment
 from htrmapper.core import theme
-from htrmapper.core.project import ImageRecord, MvsSummary, Project
+from htrmapper.core.project import DemSummary, ImageRecord, MvsSummary, Project
 from htrmapper.core.report import build_report_from_project, render_html
+from htrmapper.dem.generation import DemConfig, DemError, run_dem_generation
 from htrmapper.geo.crs import (
     CoordinateReferenceSystem,
     GeodeticPoint,
@@ -118,6 +119,8 @@ class MainWindow(QMainWindow):
             if self.project.sfm is not None and self.project.sfm.reconstruction_path:
                 self.adjust_button.setEnabled(True)
                 self.dense_button.setEnabled(True)
+            if self.project.mvs is not None and self.project.mvs.point_cloud_las_path:
+                self.dem_button.setEnabled(True)
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -153,6 +156,11 @@ class MainWindow(QMainWindow):
         self.dense_button.setEnabled(False)
         self.dense_button.clicked.connect(self._on_dense_clicked)
         toolbar.addWidget(self.dense_button)
+
+        self.dem_button = QPushButton("Gerar DEM…")
+        self.dem_button.setEnabled(False)
+        self.dem_button.clicked.connect(self._on_dem_clicked)
+        toolbar.addWidget(self.dem_button)
 
         self.status_label = QLabel("Nenhum projeto carregado.")
         self.status_label.setObjectName("statusLabel")
@@ -380,6 +388,70 @@ class MainWindow(QMainWindow):
             f"LAS: {result.point_cloud_las_path}",
         )
         self.status_label.setText(f"{len(self.project.images)} imagem(ns) carregada(s). Nuvem densa gerada.")
+        self.dem_button.setEnabled(True)
+
+    def _on_dem_clicked(self) -> None:
+        if self.project.mvs is None or not self.project.mvs.point_cloud_las_path:
+            QMessageBox.warning(self, "DEM", "Gere a nuvem densa primeiro.")
+            return
+
+        resolution_str, ok = QInputDialog.getText(
+            self, "Resolução do DEM", "Resolução em m/pixel (deixe em branco para automático):"
+        )
+        if not ok:
+            return
+        resolution_m = None
+        if resolution_str.strip():
+            try:
+                resolution_m = float(resolution_str.strip())
+            except ValueError:
+                QMessageBox.warning(self, "DEM", f"Resolução inválida: {resolution_str!r}")
+                return
+
+        output_path, _ = QFileDialog.getSaveFileName(
+            self, "Salvar DEM", f"{self.project.name}_dem.tif", "GeoTIFF (*.tif)"
+        )
+        if not output_path:
+            return
+
+        self.setCursor(Qt.CursorShape.WaitCursor)
+        self.status_label.setText("Gerando DEM...")
+        QApplication.processEvents()
+        try:
+            result = run_dem_generation(
+                Path(self.project.mvs.point_cloud_las_path),
+                self.project.crs.project_epsg,
+                Path(output_path),
+                DemConfig(resolution_m=resolution_m),
+            )
+        except DemError as exc:
+            self.unsetCursor()
+            QMessageBox.critical(self, "Falha no DEM", str(exc))
+            return
+        finally:
+            self.unsetCursor()
+
+        self.project.dem = DemSummary(
+            raster_path=result.raster_path,
+            resolution_m=result.resolution_m,
+            resolution_source=result.resolution_source,
+            width_px=result.width_px,
+            height_px=result.height_px,
+            min_elevation_m=result.min_elevation_m,
+            max_elevation_m=result.max_elevation_m,
+            num_points_used=result.num_points_used,
+            num_points_filtered_as_outliers=result.num_points_filtered_as_outliers,
+            point_density_per_m2=result.point_density_per_m2,
+        )
+
+        QMessageBox.information(
+            self,
+            "DEM gerado",
+            f"{result.width_px}x{result.height_px}px, resolução {result.resolution_m:.3f} m/px "
+            f"({result.resolution_source}).\nElevação: [{result.min_elevation_m:.2f}, {result.max_elevation_m:.2f}] m\n"
+            f"GeoTIFF: {result.raster_path}",
+        )
+        self.status_label.setText(f"{len(self.project.images)} imagem(ns) carregada(s). DEM gerado.")
 
     def _refresh(self, records: list[ImageRecord]) -> None:
         self.status_label.setText(f"{len(records)} imagem(ns) carregada(s).")

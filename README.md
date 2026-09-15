@@ -8,7 +8,7 @@ arquitetura, bibliotecas, riscos e o plano de fases.
 Foco atual do usuário: DJI Mavic 3M, imagens já geotaggeadas via PPK,
 SIRGAS 2000 / UTM 23S (EPSG:31983), agricultura sem GCP.
 
-## Status: Fase 1 + 2 + 3 + 4 (importação → SfM → ajuste GNSS → nuvem densa)
+## Status: Fase 1 + 2 + 3 + 4 + 5 (importação → SfM → ajuste GNSS → nuvem densa → DEM)
 
 Implementado nesta fase:
 
@@ -61,6 +61,16 @@ Implementado nesta fase:
   não tem GPU, então essa etapa em si (o cálculo dela) só foi validada
   quanto ao caminho de erro — a validação numérica completa depende da
   sua RTX 3060 Ti. Ver `ARCHITECTURE.md` seção 16.
+- **Fase 5** (DEM/DSM a partir da nuvem densa, via GDAL/`rasterio` +
+  `scipy.interpolate`): filtro de outliers robusto (mediana + MAD, não
+  um corte de percentil fixo — um bug real pego pelo próprio teste, ver
+  `ARCHITECTURE.md`), resolução automática (2,5x o espaçamento médio de
+  pontos) ou definida pelo usuário, interpolação linear + preenchimento
+  de buracos por nearest-neighbor, GeoTIFF com CRS/geotransform/NoData
+  corretos. Validado contra uma superfície sintética de verdade
+  conhecida: erro médio < 15cm, erro máximo < 50cm comparado ao valor
+  real da função de terreno, não apenas "rodou sem erro". CLI:
+  `htrmapper dem`. GUI: botão "Gerar DEM…". Ver `ARCHITECTURE.md` seção 17.
 
 ## Instalação (desenvolvimento)
 
@@ -84,6 +94,8 @@ htrmapper align projeto.json --workdir ./work --key-point-limit 40000
 htrmapper adjust projeto.json --workdir ./work_ba
 
 htrmapper dense projeto.json --workdir ./work_dense --quality media
+
+htrmapper dem projeto.json --output dem.tif
 ```
 
 ## Uso — GUI
@@ -109,7 +121,6 @@ pytest -q
 
 ## Próximas fases
 
-Ver `ARCHITECTURE.md`, seção "Priorização do desenvolvimento": Fase 5
-(DEM), Fase 6 (ortomosaico), Fase 7 (interface completa), Fase 8
-(validação quantitativa contra o Metashape), Fase 9 (otimização de
-performance/GPU).
+Ver `ARCHITECTURE.md`, seção "Priorização do desenvolvimento": Fase 6
+(ortomosaico), Fase 7 (interface completa), Fase 8 (validação
+quantitativa contra o Metashape), Fase 9 (otimização de performance/GPU).

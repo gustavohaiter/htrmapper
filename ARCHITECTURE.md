@@ -554,3 +554,66 @@ sem GPU.
   Fase 6 — rotulado como tal).
 - CLI: `htrmapper dense <projeto.json> --workdir <pasta> --quality media`.
   GUI: botão "Nuvem densa…".
+
+## 17. Fase 5 — geração de DEM/DSM (implementada e validada)
+
+Rasteriza a nuvem de pontos densa da Fase 4 num raster de elevação
+georreferenciado. É um **DSM** (superfície, não terreno nu): a nuvem
+vem de MVS baseado em imagem, então cada ponto já é uma amostra de
+"primeira superfície" (dossel, estruturas, solo) — não existe
+classificação solo/não-solo como em LiDAR para separar aqui. A
+classificação de solo para um DEM de terreno nu propriamente dito
+continua futura, conforme o próprio briefing ("classificação de solo
+futuramente").
+
+Construída sobre GDAL (via `rasterio`) para a escrita do GeoTIFF e
+`scipy.interpolate` para a interpolação — nenhum algoritmo de
+triangulação/rasterização próprio.
+
+- `dem.generation.run_dem_generation`:
+  1. **Filtro de outliers robusto (MAD)**: mediana + desvio absoluto
+     mediano, não um corte de percentil fixo. Um corte de percentil fixo
+     sempre remove a mesma fração (~0,1%) dos extremos, *independente* de
+     quantos outliers reais existem — um cluster de vários pontos
+     correlacionados e errados na maior parte sobrevive a ele, porque
+     percentil mede posição no ranking, não a distância real à massa de
+     dados. Isso foi um bug real pego pelo próprio teste (ver abaixo),
+     corrigido antes de chegar a produção.
+  2. **Resolução automática**: `espaçamento_médio × 2,5`, onde
+     `espaçamento_médio = sqrt(área / número_de_pontos)`. Heurística
+     documentada como tal (não uma lei física): uma célula do DEM precisa
+     de suporte de múltiplos pontos da nuvem densa para interpolar de
+     forma confiável, e a prática comum em fotogrametria aérea recomenda
+     resolução de DEM/ortomosaico de 2-4x o espaçamento de pontos/GSD.
+     Sempre sobrescrevível pelo usuário (`DemConfig.resolution_m`).
+  3. **Interpolação + preenchimento de buracos**: `scipy.interpolate.griddata`
+     linear dentro do hull convexo dos pontos, depois nearest-neighbor
+     para preencher o que sobrar (fora do hull, ou buracos que a
+     interpolação linear não alcança) — nunca extrapolação linear sem
+     controle.
+  4. Escrita do GeoTIFF via `rasterio`: CRS do projeto (nunca hardcoded),
+     geotransform norte-para-cima correto, NoData explícito (-9999),
+     Float32, escala compatível com a precisão centimétrica do resto do
+     pipeline.
+
+### Validação com verdade de campo conhecida
+
+Como a Fase 4 (nuvem densa real) não pôde ser executada nesta máquina
+(sem GPU — ver seção 16), a validação da Fase 5 usa uma nuvem de pontos
+sintética construída diretamente a partir de uma função de terreno
+conhecida (plano suave + ondulação de baixa amplitude e grande
+comprimento de onda), amostrada com ruído realista (1cm). O DEM gerado
+é comparado ponto a ponto contra o valor **verdadeiro** da função em
+centenas de posições aleatórias: erro médio absoluto abaixo de 15cm,
+erro máximo abaixo de 50cm — não apenas "rodou sem erro", mas "os
+números batem com a superfície real conhecida". Também validado:
+resolução automática vs. definida pelo usuário, geotransform/NoData
+corretos, ausência de buracos na saída, e — o achado do filtro de
+outliers acima — remoção exata de um número conhecido de pontos
+injetados como erro grosseiro.
+
+- `core.report`: quando `project.dem` existe, preenche "Digital
+  Elevation Model" (resolução real, densidade de pontos real da nuvem
+  densa) e o campo DEM dos Processing Parameters.
+- CLI: `htrmapper dem <projeto.json> --output <dem.tif> [--resolution N] [--no-filter]`.
+  GUI: botão "Gerar DEM…".

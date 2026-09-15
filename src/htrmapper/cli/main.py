@@ -6,12 +6,13 @@ import argparse
 import sys
 from pathlib import Path
 
-from htrmapper.core.project import GnssAccuracyConfig, MvsSummary, Project, ProjectCrsConfig
+from htrmapper.ba.weighted_bundle_adjustment import BaConfig, BaError, run_gnss_weighted_bundle_adjustment
+from htrmapper.core.project import DemSummary, GnssAccuracyConfig, MvsSummary, Project, ProjectCrsConfig
 from htrmapper.core.report import build_report_from_project, render_html
+from htrmapper.dem.generation import DemConfig, DemError, run_dem_generation
 from htrmapper.geo.crs import CoordinateReferenceSystem
 from htrmapper.gnss.accuracy import CameraAccuracy
 from htrmapper.io.image_import import import_folder
-from htrmapper.ba.weighted_bundle_adjustment import BaConfig, BaError, run_gnss_weighted_bundle_adjustment
 from htrmapper.mvs.dense import MvsConfig, MvsError, run_dense_reconstruction
 from htrmapper.sfm.pipeline import SfmConfig, SfmError, run_structure_from_motion
 
@@ -210,6 +211,56 @@ def _cmd_dense(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_dem(args: argparse.Namespace) -> int:
+    project_path = Path(args.project)
+    if not project_path.is_file():
+        print(f"error: project file not found: {project_path}", file=sys.stderr)
+        return 1
+
+    project = Project.load(project_path)
+    if project.mvs is None or not project.mvs.point_cloud_las_path:
+        print("error: project has no Fase 4 (dense point cloud) result; run 'htrmapper dense' first", file=sys.stderr)
+        return 1
+
+    config = DemConfig(resolution_m=args.resolution, filter_outliers=not args.no_filter)
+
+    print(f"DEM generation for project: {project.name}")
+    print(f"Point cloud: {project.mvs.point_cloud_las_path}")
+    print()
+
+    try:
+        result = run_dem_generation(
+            Path(project.mvs.point_cloud_las_path), project.crs.project_epsg, Path(args.output), config
+        )
+    except DemError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Resolution: {result.resolution_m:.4f} m/px ({result.resolution_source})")
+    print(f"Size: {result.width_px} x {result.height_px} px")
+    print(f"Elevation range: [{result.min_elevation_m:.2f}, {result.max_elevation_m:.2f}] m")
+    print(f"Points used: {result.num_points_used} ({result.num_points_filtered_as_outliers} filtered as outliers)")
+    print(f"Point density: {result.point_density_per_m2:.2f} points/m²")
+    print(f"GeoTIFF: {result.raster_path}")
+
+    project.dem = DemSummary(
+        raster_path=result.raster_path,
+        resolution_m=result.resolution_m,
+        resolution_source=result.resolution_source,
+        width_px=result.width_px,
+        height_px=result.height_px,
+        min_elevation_m=result.min_elevation_m,
+        max_elevation_m=result.max_elevation_m,
+        num_points_used=result.num_points_used,
+        num_points_filtered_as_outliers=result.num_points_filtered_as_outliers,
+        point_density_per_m2=result.point_density_per_m2,
+    )
+    project.save(project_path)
+    print(f"\nProject updated: {project_path}")
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="htrmapper", description="HTRMapper photogrammetry CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -257,6 +308,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--quality", choices=["baixa", "media", "alta", "muito_alta"], default="media", help="Dense quality tier"
     )
     dense_parser.set_defaults(func=_cmd_dense)
+
+    dem_parser = subparsers.add_parser(
+        "dem", help="Fase 5: geração de DEM/DSM a partir da nuvem densa ('htrmapper dense' primeiro)"
+    )
+    dem_parser.add_argument("project", help="Path to a project .json file with a Fase 4 (dense) result")
+    dem_parser.add_argument("--output", required=True, help="Path for the output GeoTIFF")
+    dem_parser.add_argument(
+        "--resolution", type=float, default=None, help="DEM resolution in meters/pixel (default: automatic)"
+    )
+    dem_parser.add_argument(
+        "--no-filter", action="store_true", help="Disable outlier filtering (MAD-based) before rasterization"
+    )
+    dem_parser.set_defaults(func=_cmd_dem)
 
     return parser
 

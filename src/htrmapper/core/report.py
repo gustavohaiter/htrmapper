@@ -382,6 +382,24 @@ def build_report_from_project(project: Project) -> ProcessingReport:
                 unit="pontos/m² (estimativa: área do hull convexo de câmeras, pré-ortomosaico)",
             )
 
+    if project.dem is not None:
+        dem_summary = project.dem
+        dem.resolution_cm_per_px = Metric(
+            value=round(dem_summary.resolution_m * 100, 2),
+            unit=f"cm/pix ({dem_summary.resolution_source})",
+        )
+        dem.point_density_per_m2 = Metric(
+            value=round(dem_summary.point_density_per_m2, 2), unit="pontos/m² (nuvem densa real)"
+        )
+        params.dem_section = Metric(
+            value=(
+                f"{dem_summary.width_px}x{dem_summary.height_px}px, resolução "
+                f"{dem_summary.resolution_m:.3f} m ({dem_summary.resolution_source}), "
+                f"elevação [{dem_summary.min_elevation_m:.2f}, {dem_summary.max_elevation_m:.2f}] m, "
+                f"{dem_summary.num_points_filtered_as_outliers} ponto(s) filtrado(s) como outlier"
+            )
+        )
+
     return ProcessingReport(
         project_name=project.name,
         survey_data=survey,

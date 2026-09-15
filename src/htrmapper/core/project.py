@@ -205,6 +205,30 @@ class MvsSummary:
 
 
 @dataclass
+class DemSummary:
+    """Persisted summary of a Phase 5 (DEM/DSM) run."""
+
+    raster_path: str = ""
+    resolution_m: float = 0.0
+    resolution_source: str = ""
+    width_px: int = 0
+    height_px: int = 0
+    min_elevation_m: float = 0.0
+    max_elevation_m: float = 0.0
+    num_points_used: int = 0
+    num_points_filtered_as_outliers: int = 0
+    point_density_per_m2: float = 0.0
+    ran_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "DemSummary":
+        return cls(**data)
+
+
+@dataclass
 class Project:
     """Top-level project state, serializable to/from a JSON project file."""
 
@@ -217,6 +241,7 @@ class Project:
     sfm: SfmSummary | None = None
     ba: BaSummary | None = None
     mvs: MvsSummary | None = None
+    dem: DemSummary | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -229,6 +254,7 @@ class Project:
             "sfm": self.sfm.to_dict() if self.sfm else None,
             "ba": self.ba.to_dict() if self.ba else None,
             "mvs": self.mvs.to_dict() if self.mvs else None,
+            "dem": self.dem.to_dict() if self.dem else None,
         }
 
     @classmethod
@@ -242,6 +268,7 @@ class Project:
         sfm_data = data.get("sfm")
         ba_data = data.get("ba")
         mvs_data = data.get("mvs")
+        dem_data = data.get("dem")
         return cls(
             name=data["name"],
             created_at=data.get("created_at", datetime.now().isoformat()),
@@ -252,6 +279,7 @@ class Project:
             sfm=SfmSummary.from_dict(sfm_data) if sfm_data else None,
             mvs=MvsSummary.from_dict(mvs_data) if mvs_data else None,
             ba=BaSummary.from_dict(ba_data) if ba_data else None,
+            dem=DemSummary.from_dict(dem_data) if dem_data else None,
         )
 
     def save(self, path: Path) -> None:

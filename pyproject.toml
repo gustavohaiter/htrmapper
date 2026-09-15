@@ -17,6 +17,8 @@ dependencies = [
     "matplotlib>=3.8",
     "pycolmap>=4.0,<5",
     "laspy>=2.5",
+    "rasterio>=1.3",
+    "scipy>=1.11",
 ]
 
 [project.optional-dependencies]
