@@ -6,12 +6,13 @@ import argparse
 import sys
 from pathlib import Path
 
-from htrmapper.core.project import GnssAccuracyConfig, Project, ProjectCrsConfig
+from htrmapper.core.project import GnssAccuracyConfig, MvsSummary, Project, ProjectCrsConfig
 from htrmapper.core.report import build_report_from_project, render_html
 from htrmapper.geo.crs import CoordinateReferenceSystem
 from htrmapper.gnss.accuracy import CameraAccuracy
 from htrmapper.io.image_import import import_folder
 from htrmapper.ba.weighted_bundle_adjustment import BaConfig, BaError, run_gnss_weighted_bundle_adjustment
+from htrmapper.mvs.dense import MvsConfig, MvsError, run_dense_reconstruction
 from htrmapper.sfm.pipeline import SfmConfig, SfmError, run_structure_from_motion
 
 
@@ -156,6 +157,59 @@ def _cmd_adjust(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_dense(args: argparse.Namespace) -> int:
+    project_path = Path(args.project)
+    if not project_path.is_file():
+        print(f"error: project file not found: {project_path}", file=sys.stderr)
+        return 1
+
+    project = Project.load(project_path)
+    if project.sfm is None or not project.sfm.reconstruction_path:
+        print("error: project has no Fase 2 (SfM) result; run 'htrmapper align' first", file=sys.stderr)
+        return 1
+
+    # Prefer the Fase 3 (GNSS-weighted) refined reconstruction when present;
+    # fall back to the Fase 2 one otherwise.
+    reconstruction_path = Path(
+        project.ba.reconstruction_path if project.ba and project.ba.reconstruction_path else project.sfm.reconstruction_path
+    )
+
+    image_parents = {Path(img.path).resolve().parent for img in project.images}
+    if len(image_parents) != 1:
+        print(f"error: images span {len(image_parents)} folders; cannot determine a single image root", file=sys.stderr)
+        return 1
+    image_root = next(iter(image_parents))
+
+    workdir = Path(args.workdir)
+    config = MvsConfig(quality=args.quality)
+
+    print(f"Dense reconstruction for project: {project.name}")
+    print(f"Reconstruction: {reconstruction_path}")
+    print(f"Quality: {config.quality}")
+    print()
+
+    try:
+        result = run_dense_reconstruction(project, reconstruction_path, image_root, workdir, config)
+    except MvsError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Dense points: {result.num_points}")
+    print(f"Point cloud (LAS): {result.point_cloud_las_path}")
+    print(f"Point cloud (native/PLY): {result.point_cloud_native_path}")
+
+    project.mvs = MvsSummary(
+        num_points=result.num_points,
+        quality=result.quality,
+        point_cloud_las_path=result.point_cloud_las_path,
+        point_cloud_native_path=result.point_cloud_native_path,
+    )
+    project.save(project_path)
+    print(f"\nProject updated: {project_path}")
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="htrmapper", description="HTRMapper photogrammetry CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -193,6 +247,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also refine focal length/principal point/distortion (risky for nadir-only flat flights; see BaConfig docstring)",
     )
     adjust_parser.set_defaults(func=_cmd_adjust)
+
+    dense_parser = subparsers.add_parser(
+        "dense", help="Fase 4: nuvem de pontos densa (requer GPU CUDA; 'htrmapper align' primeiro)"
+    )
+    dense_parser.add_argument("project", help="Path to a project .json file with a Fase 2 (align) result")
+    dense_parser.add_argument("--workdir", required=True, help="Directory for the dense workspace/point cloud")
+    dense_parser.add_argument(
+        "--quality", choices=["baixa", "media", "alta", "muito_alta"], default="media", help="Dense quality tier"
+    )
+    dense_parser.set_defaults(func=_cmd_dense)
 
     return parser
 

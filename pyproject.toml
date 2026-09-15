@@ -16,6 +16,7 @@ dependencies = [
     "psutil>=5.9",
     "matplotlib>=3.8",
     "pycolmap>=4.0,<5",
+    "laspy>=2.5",
 ]
 
 [project.optional-dependencies]

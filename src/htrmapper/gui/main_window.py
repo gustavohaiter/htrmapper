@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -33,7 +34,7 @@ from PySide6.QtWidgets import (
 
 from htrmapper.ba.weighted_bundle_adjustment import BaConfig, BaError, run_gnss_weighted_bundle_adjustment
 from htrmapper.core import theme
-from htrmapper.core.project import ImageRecord, Project
+from htrmapper.core.project import ImageRecord, MvsSummary, Project
 from htrmapper.core.report import build_report_from_project, render_html
 from htrmapper.geo.crs import (
     CoordinateReferenceSystem,
@@ -42,6 +43,7 @@ from htrmapper.geo.crs import (
     wgs84,
 )
 from htrmapper.io.image_import import import_folder
+from htrmapper.mvs.dense import MvsConfig, MvsError, run_dense_reconstruction
 from htrmapper.sfm.pipeline import SfmConfig, SfmError, run_structure_from_motion
 
 _STYLESHEET = f"""
@@ -115,6 +117,7 @@ class MainWindow(QMainWindow):
             self.align_button.setEnabled(True)
             if self.project.sfm is not None and self.project.sfm.reconstruction_path:
                 self.adjust_button.setEnabled(True)
+                self.dense_button.setEnabled(True)
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -145,6 +148,11 @@ class MainWindow(QMainWindow):
         self.adjust_button.setEnabled(False)
         self.adjust_button.clicked.connect(self._on_adjust_clicked)
         toolbar.addWidget(self.adjust_button)
+
+        self.dense_button = QPushButton("Nuvem densa…")
+        self.dense_button.setEnabled(False)
+        self.dense_button.clicked.connect(self._on_dense_clicked)
+        toolbar.addWidget(self.dense_button)
 
         self.status_label = QLabel("Nenhum projeto carregado.")
         self.status_label.setObjectName("statusLabel")
@@ -264,6 +272,7 @@ class MainWindow(QMainWindow):
             self._plot_aligned_positions(result.reconstruction_path)
         self.status_label.setText(f"{len(self.project.images)} imagem(ns) carregada(s). Alinhamento executado.")
         self.adjust_button.setEnabled(True)
+        self.dense_button.setEnabled(True)
 
     def _on_adjust_clicked(self) -> None:
         if self.project.sfm is None or not self.project.sfm.reconstruction_path:
@@ -313,6 +322,64 @@ class MainWindow(QMainWindow):
 
         self._plot_aligned_positions(result.reconstruction_path, label="ajustado (GNSS ponderado)")
         self.status_label.setText(f"{len(self.project.images)} imagem(ns) carregada(s). Ajuste GNSS executado.")
+
+    def _on_dense_clicked(self) -> None:
+        if self.project.sfm is None or not self.project.sfm.reconstruction_path:
+            QMessageBox.warning(self, "Nuvem densa", "Execute o alinhamento (SfM) primeiro.")
+            return
+
+        quality, ok = QInputDialog.getItem(
+            self, "Qualidade da nuvem densa", "Qualidade:", ["baixa", "media", "alta", "muito_alta"], 1, False
+        )
+        if not ok:
+            return
+
+        workdir = QFileDialog.getExistingDirectory(
+            self, "Selecionar pasta de trabalho para a nuvem densa"
+        )
+        if not workdir:
+            return
+
+        image_parents = {Path(img.path).resolve().parent for img in self.project.images}
+        if len(image_parents) != 1:
+            QMessageBox.critical(self, "Nuvem densa", "As imagens estão em pastas diferentes; não é possível determinar uma raiz única.")
+            return
+        image_root = next(iter(image_parents))
+
+        reconstruction_path = Path(
+            self.project.ba.reconstruction_path
+            if self.project.ba and self.project.ba.reconstruction_path
+            else self.project.sfm.reconstruction_path
+        )
+
+        self.setCursor(Qt.CursorShape.WaitCursor)
+        self.status_label.setText("Gerando nuvem densa (patch-match stereo + fusion)... isso pode demorar.")
+        QApplication.processEvents()
+        try:
+            result = run_dense_reconstruction(
+                self.project, reconstruction_path, image_root, Path(workdir), MvsConfig(quality=quality)
+            )
+        except MvsError as exc:
+            self.unsetCursor()
+            QMessageBox.critical(self, "Falha na nuvem densa", str(exc))
+            return
+        finally:
+            self.unsetCursor()
+
+        self.project.mvs = MvsSummary(
+            num_points=result.num_points,
+            quality=result.quality,
+            point_cloud_las_path=result.point_cloud_las_path,
+            point_cloud_native_path=result.point_cloud_native_path,
+        )
+
+        QMessageBox.information(
+            self,
+            "Nuvem densa gerada",
+            f"{result.num_points} pontos (qualidade '{result.quality}').\n"
+            f"LAS: {result.point_cloud_las_path}",
+        )
+        self.status_label.setText(f"{len(self.project.images)} imagem(ns) carregada(s). Nuvem densa gerada.")
 
     def _refresh(self, records: list[ImageRecord]) -> None:
         self.status_label.setText(f"{len(records)} imagem(ns) carregada(s).")

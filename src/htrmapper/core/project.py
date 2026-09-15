@@ -187,6 +187,24 @@ class BaSummary:
 
 
 @dataclass
+class MvsSummary:
+    """Persisted summary of a Phase 4 (dense point cloud) run."""
+
+    num_points: int = 0
+    quality: str = ""
+    point_cloud_las_path: str = ""
+    point_cloud_native_path: str = ""
+    ran_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "MvsSummary":
+        return cls(**data)
+
+
+@dataclass
 class Project:
     """Top-level project state, serializable to/from a JSON project file."""
 
@@ -198,6 +216,7 @@ class Project:
     images: list[ImageRecord] = field(default_factory=list)
     sfm: SfmSummary | None = None
     ba: BaSummary | None = None
+    mvs: MvsSummary | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -209,6 +228,7 @@ class Project:
             "images": [img.to_dict() for img in self.images],
             "sfm": self.sfm.to_dict() if self.sfm else None,
             "ba": self.ba.to_dict() if self.ba else None,
+            "mvs": self.mvs.to_dict() if self.mvs else None,
         }
 
     @classmethod
@@ -221,6 +241,7 @@ class Project:
             )
         sfm_data = data.get("sfm")
         ba_data = data.get("ba")
+        mvs_data = data.get("mvs")
         return cls(
             name=data["name"],
             created_at=data.get("created_at", datetime.now().isoformat()),
@@ -229,6 +250,7 @@ class Project:
             gnss_accuracy=GnssAccuracyConfig.from_dict(data["gnss_accuracy"]),
             images=[ImageRecord.from_dict(img) for img in data.get("images", [])],
             sfm=SfmSummary.from_dict(sfm_data) if sfm_data else None,
+            mvs=MvsSummary.from_dict(mvs_data) if mvs_data else None,
             ba=BaSummary.from_dict(ba_data) if ba_data else None,
         )
 

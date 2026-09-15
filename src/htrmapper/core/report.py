@@ -368,6 +368,20 @@ def build_report_from_project(project: Project) -> ProcessingReport:
             entries=entries,
         )
 
+    dem = DigitalElevationModel()
+    if project.mvs is not None:
+        mvs = project.mvs
+        params.point_cloud_section = Metric(
+            value=f"{mvs.num_points} pontos, qualidade '{mvs.quality}' (COLMAP patch-match stereo + fusion)"
+        )
+        params.depth_maps_section = Metric(value=f"Qualidade '{mvs.quality}' (ver Point Cloud)")
+        if survey.coverage_area_km2.is_available and survey.coverage_area_km2.value:
+            density = mvs.num_points / (survey.coverage_area_km2.value * 1_000_000.0)
+            dem.point_density_per_m2 = Metric(
+                value=round(density, 2),
+                unit="pontos/m² (estimativa: área do hull convexo de câmeras, pré-ortomosaico)",
+            )
+
     return ProcessingReport(
         project_name=project.name,
         survey_data=survey,
@@ -375,6 +389,7 @@ def build_report_from_project(project: Project) -> ProcessingReport:
         processing_parameters=params,
         camera_locations=camera_locations,
         camera_calibration=camera_calibration,
+        dem=dem,
     )
 
 

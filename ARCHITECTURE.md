@@ -497,3 +497,60 @@ observáveis.
 - CLI: `htrmapper adjust <projeto.json> --workdir <pasta>`. GUI: botão
   "Ajustar (GNSS)…", que atualiza o mapa de câmeras para mostrar as
   posições pós-ajuste.
+
+## 16. Fase 4 — nuvem de pontos densa (implementada, com limitação de ambiente)
+
+Construída sobre o próprio pipeline denso do COLMAP —
+`pycolmap.undistort_images` → `pycolmap.patch_match_stereo` →
+`pycolmap.stereo_fusion` — sem nenhum algoritmo de MVS reimplementado,
+conforme a decisão da seção 4.
+
+- `mvs.dense.run_dense_reconstruction`: desdistorce as imagens usando os
+  intrínsecos já calibrados (Fase 2/3), roda patch-match stereo e fusão
+  estéreo, e exporta a nuvem resultante para **LAS** (via `laspy`), com o
+  CRS do projeto embutido no cabeçalho (`LasHeader.add_crs`), cores RGB
+  reais dos pontos, e escala de 0,1mm — nunca mais grosseiro do que a
+  precisão que o resto do pipeline afirma ter.
+- Níveis de qualidade (baixa/média/alta/muito_alta), conforme pedido no
+  briefing: mapeados para `max_image_size` do COLMAP (o parâmetro nativo
+  de tradeoff compute/qualidade do patch-match), com "muito_alta"
+  processando na resolução nativa e cada nível abaixo reduzindo a
+  resolução linear pela metade — a mesma curva de tradeoff usada pelas
+  ferramentas de referência. `geom_consistency` (verificação de
+  consistência entre vistas) é desabilitado apenas no nível mais baixo.
+
+### Limitação de ambiente confirmada empiricamente (não hipotética)
+
+`pycolmap.patch_match_stereo` **não tem fallback de CPU nativo** — requer
+GPU CUDA (NVIDIA) ou HIP (AMD); sem uma delas, o próprio COLMAP levanta
+`ValueError: Dense stereo reconstruction requires CUDA or HIP...`. Isso
+foi confirmado interativamente durante o desenvolvimento (nenhum erro
+foi assumido sem reproduzir). Este módulo checa `pycolmap.has_cuda` antes
+de iniciar e falha rápido com uma mensagem clara, em vez de deixar esse
+erro nativo aparecer no meio de uma etapa longa.
+
+**O ambiente de desenvolvimento usado neste projeto não possui GPU.**
+Isso significa que a etapa de cálculo denso em si (patch-match stereo +
+fusão) **não pôde ser executada nem validada numericamente aqui** — só o
+caminho de erro (falta de GPU) e a exportação LAS (testados com uma
+nuvem de pontos construída manualmente, sem depender do cálculo denso em
+si) puderam ser validados de fato. O usuário tem uma RTX 3060 Ti (ver
+seção 17 do briefing original) — a validação completa desta fase, com
+números reais de reconstrução densa, só pode acontecer na máquina do
+usuário. Isso é dito aqui explicitamente para não alegar uma validação
+que não ocorreu (regra 3 do briefing).
+
+O fallback de CPU para máquinas sem GPU permanece **não implementado**:
+a arquitetura já reserva o OpenMVS como processo externo opcional (seção
+2, por causa da licença AGPL), mas integrá-lo (conversão do formato de
+cena, chamada do binário `DensifyPointCloud`) fica para uma iteração
+futura, priorizado apenas se o usuário precisar processar em uma máquina
+sem GPU.
+
+- `core.report`: quando `project.mvs` existe, preenche "Point Cloud" nos
+  Processing Parameters e uma estimativa de densidade de pontos em
+  "Digital Elevation Model" (usando a área do hull convexo de câmeras da
+  Fase 1 como proxy, já que a área real do ortomosaico só existe na
+  Fase 6 — rotulado como tal).
+- CLI: `htrmapper dense <projeto.json> --workdir <pasta> --quality media`.
+  GUI: botão "Nuvem densa…".
