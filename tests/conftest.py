@@ -138,10 +138,17 @@ def _insert_app1_segment(jpeg_bytes: bytes, payload: bytes) -> bytes:
     return jpeg_bytes[:pos] + segment + jpeg_bytes[pos:]
 
 
-def make_synthetic_dji_jpeg(path: Path, spec: SyntheticImageSpec | None = None) -> Path:
-    """Write a synthetic JPEG with EXIF (+ optional DJI XMP) to `path`."""
+def make_synthetic_dji_jpeg(
+    path: Path, spec: SyntheticImageSpec | None = None, image: "Image.Image | None" = None
+) -> Path:
+    """Write a synthetic JPEG with EXIF (+ optional DJI XMP) to `path`.
+
+    `image`, if given, replaces the default flat-color fill -- used by the
+    textured synthetic-scene generator (tests/synthetic_scene.py), since a
+    flat color has no texture for SIFT to find any keypoints in.
+    """
     spec = spec or SyntheticImageSpec()
-    img = Image.new("RGB", (spec.width, spec.height), color=(120, 130, 90))
+    img = image if image is not None else Image.new("RGB", (spec.width, spec.height), color=(120, 130, 90))
 
     exif_bytes = _build_exif_bytes(spec)
     jpeg_bytes_io = path.open("wb")

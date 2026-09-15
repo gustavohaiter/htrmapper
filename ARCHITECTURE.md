@@ -100,6 +100,34 @@ profiling mostrar que a camada Python é o gargalo (ver riscos).
 numérico mínimo para evitar matriz de peso singular — isso será documentado
 e testado explicitamente (ver testes de Fase 3).
 
+### Achado da Fase 2 relevante para a Fase 3: `PosePrior` do próprio COLMAP
+
+Durante a implementação da Fase 2, validamos interativamente (via `pycolmap`
+4.2) que o COLMAP já possui uma tabela `PosePrior` no seu banco de dados,
+com `position` + `position_covariance` + `coordinate_system` (WGS84 ou
+Cartesian) por imagem, populada automaticamente a partir do GPS do EXIF. Ela
+já é o mecanismo que `match_spatial` usa para restringir pares candidatos
+(Fase 2), e o COLMAP expõe também `IncrementalPipelineOptions.use_prior_position`
+e uma classe `PosePriorBundleAdjustmentOptions`/`CeresPosePriorBundleAdjustmentOptions`
+— ou seja, um bundle adjustment com prior de posição **ponderado por
+covariância** já existe dentro do Ceres embutido no COLMAP.
+
+Validamos experimentalmente que dá para sobrescrever a covariância desse
+`PosePrior` com a nossa própria (`CameraAccuracy.weight_matrix()` invertida)
+via `Database.update_pose_prior()`, no mesmo registro que o COLMAP já criou
+a partir do EXIF. Isso muda a avaliação de risco da Fase 3 para melhor: em
+vez de necessariamente escrever uma `ceres::CostFunction` própria do zero
+via `pyceres`, a primeira abordagem a validar na Fase 3 é usar o bundle
+adjustment de prior de posição **já existente no COLMAP**, alimentado com a
+nossa matriz de peso — e só partir para uma cost function própria em Ceres
+se essa abordagem não permitir o controle fino que o projeto exige (ex.:
+covariância anisotrópica alinhada ao referencial local ENU da câmera, não
+apenas WGS84/Cartesian genérico). Ainda não confirmamos em que referencial
+exato (ENU local vs. geográfico) o COLMAP espera a `position_covariance`
+quando `coordinate_system=WGS84` — isso é o primeiro item a investigar/testar
+antes de usar essa via em produção, precisamente para não fazer suposição
+errada de unidade que comprometeria a precisão (regra 3 do briefing).
+
 ## 4. Reconstrução densa (Fase 4)
 
 Pipeline: `undistort images (usando parâmetros calibrados do BA) → patch
@@ -319,3 +347,72 @@ incrementalmente: a cada fase implementada, mais seções passam de
 - `geo.gsd`, `geo.coverage`, `core.system_info`, `core.report`: fundação
   do relatório de qualidade (ver seção 11 acima), incluindo exportação
   HTML via `htrmapper import --report-out relatorio.html`.
+
+## 14. Fase 2 — features, matching e SfM inicial (implementada)
+
+Construída inteiramente sobre `pycolmap` (bindings Python do COLMAP),
+conforme a decisão arquitetural da seção 1: nenhum detector de features,
+matcher ou solver de SfM é reimplementado aqui.
+
+- `sfm.camera_model`: deriva a estimativa inicial de intrínsecos
+  (fx, fy, cx, cy) via o mesmo truque de crop-factor do `geo.gsd`
+  (`sensor_width_mm_from_crop_factor`, reaproveitado, não duplicado),
+  agrupando imagens por `camera_model` — cada câmera física ganha sua
+  própria estimativa, preparando o suporte a múltiplas câmeras (RGB +
+  multiespectral no futuro). Levanta `InsufficientExifError` de forma
+  explícita (nunca adivinha) quando faltam os campos EXIF necessários;
+  nesse caso o `sfm.pipeline` cai para o modo automático do próprio
+  COLMAP (`CameraMode.AUTO` + leitura de EXIF nativa), documentado como
+  tal no resultado.
+- `sfm.pipeline.run_structure_from_motion`: extração de features SIFT
+  (`pycolmap.extract_features`, limite de key points configurável,
+  default 40.000 por imagem), matching espacial restrito pelas posições
+  GNSS (`pycolmap.match_spatial`, que já consome o `PosePrior` que o
+  COLMAP cria automaticamente a partir do GPS do EXIF — ver achado na
+  seção 3), com verificação geométrica/RANSAC embutida
+  (`TwoViewGeometryOptions`); cai para matching exaustivo quando há menos
+  de 3 imagens com posição GNSS válida (GNSS nunca é dependência
+  absoluta, conforme o briefing). Reconstrução incremental via
+  `pycolmap.incremental_mapping`. Georreferenciamento por alinhamento de
+  similaridade (`pycolmap.align_reconstruction_to_locations`) às mesmas
+  posições GNSS, transformadas para o CRS do projeto via `geo.crs` —
+  nunca um reescalonamento linear ingênuo. Falhas parciais (imagens não
+  registradas, componentes desconectados, alinhamento que falha) são
+  reportadas explicitamente no `SfmResult`, nunca escondidas.
+- `core.project.SfmSummary`: persiste o resumo do resultado da Fase 2 no
+  arquivo de projeto (reprodutibilidade), mantendo a reconstrução
+  completa (tie points, observações) no formato nativo do COLMAP em
+  disco, carregável diretamente por `pycolmap` nas fases seguintes.
+- `core.report`: quando `project.sfm` existe, preenche "Tie points",
+  "Projections", "Câmeras alinhadas" e um novo campo
+  **"Reprojection error (inicial, SfM/COLMAP)"**, mantido explicitamente
+  distinto do "Reprojection error (final, ponderado por GNSS)" — que
+  continua pendente da Fase 3 — para nunca confundir o erro do BA interno
+  não ponderado do COLMAP com o resultado final ponderado por GNSS que o
+  usuário pediu.
+- CLI: `htrmapper align <projeto.json> --workdir <pasta>`. GUI: botão
+  "Alinhar (SfM)…", que atualiza o mapa de posições de câmera para
+  mostrar as posições **alinhadas pelo SfM** (rótulo distinto do mapa de
+  GNSS bruto da Fase 1).
+
+### Validação real (não apenas "não quebrou")
+
+Como imagens sintéticas de cor sólida (usadas nos testes da Fase 1) têm
+zero textura — SIFT não encontra nenhum keypoint nelas — foi criado um
+gerador de cena sintética texturizada (`tests/synthetic_scene.py`): uma
+"textura de terreno" com milhares de formas coloridas aleatórias,
+fotografada em nadir (câmera olhando reto para baixo, sem rotação) a
+partir de posições de câmera conhecidas, simulando exatamente a geometria
+pinhole via recorte+reamostragem da textura na escala implicada pela
+fórmula de GSD — sem necessidade de um motor de renderização 3D, porque a
+cena é um plano e a câmera não tem inclinação.
+
+Isso permitiu um teste de integração real, com verdade de campo conhecida
+(`tests/test_sfm_pipeline.py`): todas as imagens se registram, ~1000 tie
+points triangulados, erro de reprojeção médio de ~0,085 pixel (consistente
+com uma cena sintética sem ruído), e — mais importante — as posições de
+câmera recuperadas após o alinhamento por similaridade às coordenadas
+GNSS batem com as posições verdadeiras conhecidas a menos de 1 metro
+(na prática, submilimétrico). Isso valida de ponta a ponta: extração de
+features, matching restrito por GNSS, SfM incremental, e georreferenciamento
+— não apenas que o pipeline "não quebrou".

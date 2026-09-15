@@ -11,6 +11,7 @@ from htrmapper.core.report import build_report_from_project, render_html
 from htrmapper.geo.crs import CoordinateReferenceSystem
 from htrmapper.gnss.accuracy import CameraAccuracy
 from htrmapper.io.image_import import import_folder
+from htrmapper.sfm.pipeline import SfmConfig, SfmError, run_structure_from_motion
 
 
 def _cmd_import(args: argparse.Namespace) -> int:
@@ -64,6 +65,54 @@ def _cmd_import(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_align(args: argparse.Namespace) -> int:
+    project_path = Path(args.project)
+    if not project_path.is_file():
+        print(f"error: project file not found: {project_path}", file=sys.stderr)
+        return 1
+
+    project = Project.load(project_path)
+    if not project.images:
+        print("error: project has no imported images; run 'htrmapper import' first", file=sys.stderr)
+        return 1
+
+    workdir = Path(args.workdir)
+    config = SfmConfig(key_point_limit=args.key_point_limit)
+
+    print(f"Aligning project: {project.name} ({len(project.images)} images)")
+    print(f"Work directory: {workdir}")
+    print()
+
+    try:
+        result = run_structure_from_motion(project, workdir, config)
+    except SfmError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Matching strategy: {result.matching_strategy}")
+    for group in result.camera_groups:
+        print(
+            f"Camera group '{group.camera_model}': {group.num_images} image(s), "
+            f"intrinsics from {group.intrinsics_source}"
+            + (f" (fx={group.fx_px:.1f}px)" if group.fx_px else "")
+        )
+    print()
+    print(f"Registered: {result.num_registered} / {result.num_images_input}")
+    if result.unregistered_image_names:
+        print(f"Unregistered images: {result.unregistered_image_names}")
+    print(f"Tie points (3D): {result.num_points3d}")
+    print(f"Observations (projections): {result.num_observations}")
+    if result.mean_reprojection_error_px is not None:
+        print(f"Mean reprojection error (COLMAP's own initial BA, unweighted): {result.mean_reprojection_error_px:.3f} px")
+    print(f"Georeferenced: {result.georeferenced} -- {result.georeferencing_note}")
+
+    project.sfm = result.to_project_summary()
+    project.save(project_path)
+    print(f"\nProject updated: {project_path}")
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="htrmapper", description="HTRMapper photogrammetry CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -79,6 +128,16 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser.add_argument("--project-out", default=None, help="Path to save the .json project file")
     import_parser.add_argument("--report-out", default=None, help="Path to save the HTML processing report")
     import_parser.set_defaults(func=_cmd_import)
+
+    align_parser = subparsers.add_parser(
+        "align", help="Fase 2: feature extraction, matching and initial SfM (requires a saved project)"
+    )
+    align_parser.add_argument("project", help="Path to a project .json file saved by 'htrmapper import'")
+    align_parser.add_argument("--workdir", required=True, help="Directory for the COLMAP database/reconstruction")
+    align_parser.add_argument(
+        "--key-point-limit", type=int, default=40_000, help="Max SIFT features per image (default: 40000)"
+    )
+    align_parser.set_defaults(func=_cmd_align)
 
     return parser
 

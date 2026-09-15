@@ -121,6 +121,38 @@ class ProjectCrsConfig:
 
 
 @dataclass
+class SfmSummary:
+    """Persisted summary of a Phase 2 (feature extraction/matching/SfM) run.
+
+    Kept intentionally small -- the full reconstruction (tie points, per-
+    observation data) stays on disk in COLMAP's own format at
+    `reconstruction_path`, for later phases to load directly via pycolmap.
+    This summary is what the project file and the processing report need
+    without re-opening that reconstruction.
+    """
+
+    num_images_input: int = 0
+    num_registered: int = 0
+    unregistered_image_names: list[str] = field(default_factory=list)
+    num_points3d: int = 0
+    num_observations: int = 0
+    mean_reprojection_error_px: float | None = None
+    matching_strategy: str = ""
+    georeferenced: bool = False
+    georeferencing_note: str = ""
+    database_path: str = ""
+    reconstruction_path: str = ""
+    ran_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SfmSummary":
+        return cls(**data)
+
+
+@dataclass
 class Project:
     """Top-level project state, serializable to/from a JSON project file."""
 
@@ -130,6 +162,7 @@ class Project:
     crs: ProjectCrsConfig = field(default_factory=ProjectCrsConfig)
     gnss_accuracy: GnssAccuracyConfig = field(default_factory=GnssAccuracyConfig)
     images: list[ImageRecord] = field(default_factory=list)
+    sfm: SfmSummary | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -139,6 +172,7 @@ class Project:
             "crs": self.crs.to_dict(),
             "gnss_accuracy": self.gnss_accuracy.to_dict(),
             "images": [img.to_dict() for img in self.images],
+            "sfm": self.sfm.to_dict() if self.sfm else None,
         }
 
     @classmethod
@@ -149,6 +183,7 @@ class Project:
                 f"project file schema_version={schema_version} is newer than this "
                 f"htrmapper build supports (max {SCHEMA_VERSION}); upgrade htrmapper"
             )
+        sfm_data = data.get("sfm")
         return cls(
             name=data["name"],
             created_at=data.get("created_at", datetime.now().isoformat()),
@@ -156,6 +191,7 @@ class Project:
             crs=ProjectCrsConfig.from_dict(data["crs"]),
             gnss_accuracy=GnssAccuracyConfig.from_dict(data["gnss_accuracy"]),
             images=[ImageRecord.from_dict(img) for img in data.get("images", [])],
+            sfm=SfmSummary.from_dict(sfm_data) if sfm_data else None,
         )
 
     def save(self, path: Path) -> None:

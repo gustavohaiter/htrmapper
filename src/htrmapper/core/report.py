@@ -87,7 +87,15 @@ class SurveyData:
     coverage_area_km2: Metric = field(default_factory=lambda: pending(1, "Menos de 3 posições válidas de câmera"))
     tie_points: Metric = field(default_factory=lambda: pending(2))
     projections: Metric = field(default_factory=lambda: pending(2))
+    # COLMAP's own (unweighted) bundle adjustment error from Phase 2's
+    # initial SfM -- distinct from `reprojection_error_px`, which stays
+    # pending until the GNSS-weighted bundle adjustment (Phase 3) produces
+    # the final, reported value. Never conflate the two.
+    initial_reprojection_error_px: Metric = field(default_factory=lambda: pending(2))
     reprojection_error_px: Metric = field(default_factory=lambda: pending(3))
+    matching_strategy: str = ""
+    georeferencing_note: str = ""
+    unregistered_images: list[str] = field(default_factory=list)
     cameras: list[CameraModelSummary] = field(default_factory=list)
     camera_map_png: bytes | None = None
 
@@ -292,6 +300,27 @@ def build_report_from_project(project: Project) -> ProcessingReport:
         system=detect_system_info(),
     )
 
+    if project.sfm is not None:
+        sfm = project.sfm
+        survey.aligned_cameras = Metric(value=sfm.num_registered, unit=f"/ {sfm.num_images_input}")
+        survey.tie_points = Metric(value=sfm.num_points3d)
+        survey.projections = Metric(value=sfm.num_observations)
+        if sfm.mean_reprojection_error_px is not None:
+            survey.initial_reprojection_error_px = Metric(
+                value=round(sfm.mean_reprojection_error_px, 4),
+                unit="pix (SfM inicial, COLMAP, sem peso GNSS)",
+            )
+        survey.matching_strategy = sfm.matching_strategy
+        survey.georeferencing_note = sfm.georeferencing_note
+        survey.unregistered_images = sfm.unregistered_image_names
+        params.aligned_cameras = Metric(value=sfm.num_registered, unit=f"/ {sfm.num_images_input}")
+        params.tie_points_section = Metric(
+            value=(
+                f"{sfm.num_points3d} tie points, {sfm.num_observations} observations, "
+                f"matching: {sfm.matching_strategy}"
+            )
+        )
+
     return ProcessingReport(
         project_name=project.name,
         survey_data=survey,
@@ -411,12 +440,16 @@ tr:nth-child(even) td {{ background-color: {theme.SURFACE}; }}
 <tr><td>Área de cobertura</td><td>{_esc(survey.coverage_area_km2.render_text())}</td></tr>
 <tr><td>Tie points</td><td>{_esc(survey.tie_points.render_text())}</td></tr>
 <tr><td>Projections</td><td>{_esc(survey.projections.render_text())}</td></tr>
-<tr><td>Reprojection error</td><td>{_esc(survey.reprojection_error_px.render_text())}</td></tr>
+<tr><td>Reprojection error (inicial, SfM/COLMAP)</td><td>{_esc(survey.initial_reprojection_error_px.render_text())}</td></tr>
+<tr><td>Reprojection error (final, ponderado por GNSS)</td><td>{_esc(survey.reprojection_error_px.render_text())}</td></tr>
 </table>
 <table>
 <tr><th>Câmera</th><th>Qtd. imagens</th><th>Resolução</th><th>Focal Length</th><th>Pixel Size</th><th>Precalibrada</th></tr>
 {camera_rows}
 </table>
+{f'<p>Estratégia de matching: {_esc(survey.matching_strategy)}</p>' if survey.matching_strategy else ''}
+{f'<p>Georreferenciamento: {_esc(survey.georeferencing_note)}</p>' if survey.georeferencing_note else ''}
+{f'<p class="pending">Imagens não alinhadas: {_esc(", ".join(survey.unregistered_images))}</p>' if survey.unregistered_images else ''}
 </div>
 
 <div class="section">

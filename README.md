@@ -8,7 +8,7 @@ arquitetura, bibliotecas, riscos e o plano de fases.
 Foco atual do usuário: DJI Mavic 3M, imagens já geotaggeadas via PPK,
 SIRGAS 2000 / UTM 23S (EPSG:31983), agricultura sem GCP.
 
-## Status: Fase 1 (importação, EXIF/XMP, CRS, visualização, config. GNSS)
+## Status: Fase 1 + Fase 2 (importação + features/matching/SfM inicial)
 
 Implementado nesta fase:
 
@@ -34,6 +34,13 @@ Implementado nesta fase:
   fases futuras (tie points, bundle adjustment, nuvem densa, DEM,
   ortomosaico) aparece explicitamente como **"Não disponível — calculado
   na Fase N"**, nunca como zero ou valor inventado.
+- **Fase 2** (features + matching + SfM inicial, sobre `pycolmap`/COLMAP):
+  extração de features SIFT, matching restrito por posição GNSS (com
+  fallback exaustivo quando há poucas posições), reconstrução incremental
+  e georreferenciamento por alinhamento de similaridade às coordenadas
+  GNSS. CLI: `htrmapper align`. GUI: botão "Alinhar (SfM)…". Ver
+  `ARCHITECTURE.md` seção 14 para detalhes e a validação com dados
+  sintéticos de verdade de campo conhecida.
 
 ## Instalação (desenvolvimento)
 
@@ -51,6 +58,8 @@ htrmapper import /caminho/para/imagens \
     --xy-sigma 0.02 --z-sigma 0.02 \
     --project-out projeto.json \
     --report-out relatorio.html
+
+htrmapper align projeto.json --workdir ./work --key-point-limit 40000
 ```
 
 ## Uso — GUI
@@ -76,8 +85,8 @@ pytest -q
 
 ## Próximas fases
 
-Ver `ARCHITECTURE.md`, seção "Priorização do desenvolvimento": Fase 2
-(features/matching/SfM via COLMAP), Fase 3 (bundle adjustment com pesos
-GNSS via Ceres), Fase 4 (nuvem densa), Fase 5 (DEM), Fase 6 (ortomosaico),
-Fase 7 (interface completa), Fase 8 (validação quantitativa contra o
-Metashape), Fase 9 (otimização de performance/GPU).
+Ver `ARCHITECTURE.md`, seção "Priorização do desenvolvimento": Fase 3
+(bundle adjustment ponderado por GNSS), Fase 4 (nuvem densa), Fase 5
+(DEM), Fase 6 (ortomosaico), Fase 7 (interface completa), Fase 8
+(validação quantitativa contra o Metashape), Fase 9 (otimização de
+performance/GPU).

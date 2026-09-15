@@ -45,6 +45,22 @@ class GsdEstimate:
     crop_factor: float
 
 
+def sensor_width_mm_from_crop_factor(focal_length_mm: float, focal_length_35mm_equiv_mm: float) -> float:
+    """Derive physical sensor width from the crop factor implied by EXIF's
+    35mm-equivalent focal length. Shared by GSD estimation here and by the
+    initial camera-intrinsics guess in `sfm.camera_model` -- one formula,
+    reused, instead of two copies drifting apart.
+    """
+    if focal_length_mm <= 0:
+        raise ValueError(f"focal_length_mm must be positive, got {focal_length_mm}")
+    if focal_length_35mm_equiv_mm <= 0:
+        raise ValueError(
+            f"focal_length_35mm_equiv_mm must be positive, got {focal_length_35mm_equiv_mm}"
+        )
+    crop_factor = focal_length_35mm_equiv_mm / focal_length_mm
+    return FULL_FRAME_SENSOR_WIDTH_MM / crop_factor
+
+
 def estimate_gsd(
     flying_height_m: float,
     focal_length_mm: float,
@@ -58,17 +74,11 @@ def estimate_gsd(
     """
     if flying_height_m <= 0:
         raise ValueError(f"flying_height_m must be positive, got {flying_height_m}")
-    if focal_length_mm <= 0:
-        raise ValueError(f"focal_length_mm must be positive, got {focal_length_mm}")
-    if focal_length_35mm_equiv_mm <= 0:
-        raise ValueError(
-            f"focal_length_35mm_equiv_mm must be positive, got {focal_length_35mm_equiv_mm}"
-        )
     if image_width_px <= 0:
         raise ValueError(f"image_width_px must be positive, got {image_width_px}")
 
-    crop_factor = focal_length_35mm_equiv_mm / focal_length_mm
-    sensor_width_mm = FULL_FRAME_SENSOR_WIDTH_MM / crop_factor
+    sensor_width_mm = sensor_width_mm_from_crop_factor(focal_length_mm, focal_length_35mm_equiv_mm)
+    crop_factor = FULL_FRAME_SENSOR_WIDTH_MM / sensor_width_mm
     pixel_pitch_mm = sensor_width_mm / image_width_px
 
     gsd_m_per_px = (pixel_pitch_mm / 1000.0) * flying_height_m / (focal_length_mm / 1000.0)

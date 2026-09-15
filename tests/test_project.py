@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from htrmapper.core.project import GnssAccuracyConfig, ImageRecord, Project, ProjectCrsConfig
+from htrmapper.core.project import GnssAccuracyConfig, ImageRecord, Project, ProjectCrsConfig, SfmSummary
 from htrmapper.gnss.accuracy import CameraAccuracy
 
 
@@ -71,3 +71,34 @@ def test_image_record_warnings_survive_round_trip(tmp_path: Path):
     loaded = Project.load(out_path)
 
     assert loaded.images[0].warnings == ["no gimbal orientation (yaw/pitch/roll) found in XMP"]
+
+
+def test_sfm_summary_is_none_by_default():
+    project = Project(name="p")
+
+    assert project.sfm is None
+    assert project.to_dict()["sfm"] is None
+
+
+def test_sfm_summary_round_trips(tmp_path: Path):
+    project = _sample_project()
+    project.sfm = SfmSummary(
+        num_images_input=6,
+        num_registered=6,
+        num_points3d=1012,
+        num_observations=3893,
+        mean_reprojection_error_px=0.085,
+        matching_strategy="spatial (restricted by GNSS position)",
+        georeferenced=True,
+        georeferencing_note="aligned to EPSG:31983 using 6 GNSS-positioned camera(s)",
+        reconstruction_path="/work/sparse",
+    )
+    out_path = tmp_path / "project.json"
+
+    project.save(out_path)
+    loaded = Project.load(out_path)
+
+    assert loaded.sfm is not None
+    assert loaded.sfm.num_registered == 6
+    assert loaded.sfm.mean_reprojection_error_px == pytest.approx(0.085)
+    assert loaded.sfm.georeferenced is True

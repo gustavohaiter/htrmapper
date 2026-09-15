@@ -14,6 +14,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -40,6 +41,7 @@ from htrmapper.geo.crs import (
     wgs84,
 )
 from htrmapper.io.image_import import import_folder
+from htrmapper.sfm.pipeline import SfmConfig, SfmError, run_structure_from_motion
 
 _STYLESHEET = f"""
 QMainWindow, QWidget {{
@@ -109,6 +111,7 @@ class MainWindow(QMainWindow):
             self._refresh(self.project.images)
             self.save_project_button.setEnabled(True)
             self.generate_report_button.setEnabled(True)
+            self.align_button.setEnabled(True)
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -129,6 +132,11 @@ class MainWindow(QMainWindow):
         self.generate_report_button.setEnabled(False)
         self.generate_report_button.clicked.connect(self._on_generate_report_clicked)
         toolbar.addWidget(self.generate_report_button)
+
+        self.align_button = QPushButton("Alinhar (SfM)…")
+        self.align_button.setEnabled(False)
+        self.align_button.clicked.connect(self._on_align_clicked)
+        toolbar.addWidget(self.align_button)
 
         self.status_label = QLabel("Nenhum projeto carregado.")
         self.status_label.setObjectName("statusLabel")
@@ -178,6 +186,7 @@ class MainWindow(QMainWindow):
 
         self.save_project_button.setEnabled(True)
         self.generate_report_button.setEnabled(True)
+        self.align_button.setEnabled(True)
 
     def _on_save_project_clicked(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -197,6 +206,55 @@ class MainWindow(QMainWindow):
         report = build_report_from_project(self.project)
         Path(path).write_text(render_html(report), encoding="utf-8")
         QMessageBox.information(self, "Relatório gerado", f"Relatório salvo em:\n{path}")
+
+    def _on_align_clicked(self) -> None:
+        workdir = QFileDialog.getExistingDirectory(
+            self, "Selecionar pasta de trabalho para o alinhamento (banco COLMAP, reconstrução)"
+        )
+        if not workdir:
+            return
+
+        self.setCursor(Qt.CursorShape.WaitCursor)
+        self.status_label.setText("Alinhando (features, matching, SfM)... isso pode demorar.")
+        QApplication.processEvents()
+        try:
+            result = run_structure_from_motion(self.project, Path(workdir), SfmConfig())
+        except SfmError as exc:
+            self.unsetCursor()
+            QMessageBox.critical(self, "Falha no alinhamento", str(exc))
+            self._refresh(self.project.images)
+            return
+        finally:
+            self.unsetCursor()
+
+        self.project.sfm = result.to_project_summary()
+
+        short = (
+            f"Alinhamento concluído: {result.num_registered}/{result.num_images_input} imagens registradas, "
+            f"{result.num_points3d} tie points, erro de reprojeção {result.mean_reprojection_error_px:.3f} px "
+            f"(inicial, sem peso GNSS)."
+            if result.mean_reprojection_error_px is not None
+            else f"Alinhamento concluído: {result.num_registered}/{result.num_images_input} imagens registradas."
+        )
+        detail_lines = [
+            f"Matching strategy: {result.matching_strategy}",
+            f"Registered: {result.num_registered} / {result.num_images_input}",
+            f"Unregistered images: {result.unregistered_image_names}",
+            f"Tie points (3D): {result.num_points3d}",
+            f"Observations (projections): {result.num_observations}",
+            f"Georeferenced: {result.georeferenced} -- {result.georeferencing_note}",
+        ]
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Alinhamento (SfM)")
+        box.setIcon(QMessageBox.Icon.Information if result.success else QMessageBox.Icon.Warning)
+        box.setText(short)
+        box.setDetailedText("\n".join(detail_lines))
+        box.exec()
+
+        if result.georeferenced:
+            self._plot_aligned_positions(result.reconstruction_path)
+        self.status_label.setText(f"{len(self.project.images)} imagem(ns) carregada(s). Alinhamento executado.")
 
     def _refresh(self, records: list[ImageRecord]) -> None:
         self.status_label.setText(f"{len(records)} imagem(ns) carregada(s).")
@@ -222,7 +280,7 @@ class MainWindow(QMainWindow):
         project_crs = CoordinateReferenceSystem(self.project.crs.project_epsg)
         transformer = GeodeticTransformer(wgs84(), project_crs)
 
-        xs, ys, labels = [], [], []
+        xs, ys = [], []
         for record in records:
             if not record.position_valid:
                 continue
@@ -231,8 +289,22 @@ class MainWindow(QMainWindow):
             )
             xs.append(point.x)
             ys.append(point.y)
-            labels.append(record.file_name)
 
+        self._plot_points(xs, ys, f"Posições das câmeras — GNSS bruto ({len(xs)} válidas)")
+
+    def _plot_aligned_positions(self, reconstruction_path: str) -> None:
+        import pycolmap
+
+        reconstruction = pycolmap.Reconstruction(reconstruction_path)
+        xs, ys = [], []
+        for image_id in reconstruction.reg_image_ids():
+            center = reconstruction.image(image_id).projection_center()
+            xs.append(float(center[0]))
+            ys.append(float(center[1]))
+
+        self._plot_points(xs, ys, f"Posições das câmeras — SfM alinhado ({len(xs)} registradas)")
+
+    def _plot_points(self, xs: list[float], ys: list[float], title: str) -> None:
         self.axes.clear()
         self.axes.set_facecolor(theme.BACKGROUND)
         if xs:
@@ -242,7 +314,7 @@ class MainWindow(QMainWindow):
             self.axes.set_aspect("equal", adjustable="datalim")
         self.axes.set_xlabel(f"Este (m) — EPSG:{self.project.crs.project_epsg}", color=theme.PRIMARY_DARK)
         self.axes.set_ylabel("Norte (m)", color=theme.PRIMARY_DARK)
-        self.axes.set_title(f"Posições das câmeras ({len(xs)} válidas)", color=theme.PRIMARY_DARK)
+        self.axes.set_title(title, color=theme.PRIMARY_DARK)
         self.axes.tick_params(colors=theme.TEXT_MUTED)
         for spine in self.axes.spines.values():
             spine.set_color(theme.BORDER)
