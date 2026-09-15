@@ -221,7 +221,70 @@ htrmapper/
 └── data/samples/     # espaço para datasets reais de teste (git-ignored)
 ```
 
-## 11. Fase 1 — o que está implementado neste commit
+## 11. Especificação do relatório de processamento (Quality Report)
+
+O usuário forneceu um relatório real do Agisoft Metashape (voo eBee,
+câmera S.O.D.A, 404 imagens) como referência do que o HTRMapper deve
+produzir ao final do processamento. A tabela abaixo mapeia **cada campo**
+desse relatório para o modelo de dados do HTRMapper e para a fase que o
+calcula, para deixar explícito que o objetivo não é copiar o layout do
+Metashape, mas chegar às mesmas grandezas fotogramétricas por meios
+próprios, e nunca reportar um número sem tê-lo de fato calculado.
+
+| Seção do relatório (Metashape) | Campo | Fonte no HTRMapper | Fase |
+|---|---|---|---|
+| Capa | Preview do ortomosaico | Miniatura do GeoTIFF final | 6 |
+| Survey Data | Número de imagens / estações de câmera | `len(project.images)` | 1 (já disponível) |
+| Survey Data | Mapa de posições de câmera + overlap | `geo.crs` + poses; overlap requer grafo de matches | 1 (posições) / 2 (overlap) |
+| Survey Data | Altitude de voo | `drone-dji:RelativeAltitude` (XMP) ou EXIF GPS altitude | 1 (já disponível) |
+| Survey Data | Resolução em solo (GSD, cm/pix) | `geo.gsd.estimate_gsd_cm` (focal, altitude, sensor via crop factor) | 1 (já disponível, estimativa pré-BA) |
+| Survey Data | Área de cobertura (km²) | `geo.coverage` (hull convexo das posições de câmera) | 1 (estimativa) / 6 (área real do ortomosaico) |
+| Survey Data | Tie points / Projections | Saída do SfM (COLMAP) | 2 |
+| Survey Data | Reprojection error (pix) | Saída do bundle adjustment | 3 |
+| Survey Data | Tabela de câmeras (modelo, resolução, focal, pixel size, precalibrada) | `ImageRecord` agregado por `camera_model` | 1 (já disponível, exceto "precalibrada") |
+| Camera Calibration | Resíduos de imagem por modelo de câmera | Saída do BA (resíduos de reprojeção por observação) | 3 |
+| Camera Calibration | Coeficientes (f, cx, cy, k1-k4, p1, p2, b1, b2) + matriz de correlação | Parâmetros otimizados do BA + matriz de covariância do solver | 3 |
+| Camera Locations | Mapa de elipses de erro (X,Y,Z) | Resíduo `posição_ajustada - posição_GNSS` por câmera, decomposto e escalado pela covariância a posteriori | 3 |
+| Camera Locations | Tabela de erro médio (X, Y, Z, XY, Total em cm) | RMSE dos resíduos GNSS acima | 3 |
+| DEM | Preview colorido + resolução + densidade de pontos | Raster gerado + estatística da nuvem densa | 4 e 5 |
+| Orthomosaic | Preview + tamanho + CRS | GeoTIFF final | 6 |
+| Processing Parameters → General | Cameras / Aligned cameras / CRS / Rotation angles | `Project` + resultado do SfM | 1 (CRS) / 2 (alinhamento) |
+| Processing Parameters → Tie Points | Points, RMS/Max reprojection error, key point size, parâmetros de alinhamento (accuracy, key point limit, tie point limit) | Config de features/matching + saída do SfM/BA | 2 e 3 |
+| Processing Parameters → Depth Maps | Quality, filtering mode, tempo/memória | Config e telemetria do MVS (patch-match) | 4 |
+| Processing Parameters → Point Cloud | Contagem de pontos, atributos, tempo/memória | Saída do MVS/fusion | 4 |
+| Processing Parameters → DEM | Tamanho, CRS, parâmetros de reconstrução, tempo/memória | Config e telemetria da rasterização | 5 |
+| Processing Parameters → Orthomosaic | Tamanho, CRS, blending mode, surface, tempo/memória | Config e telemetria da ortorretificação | 6 |
+| Processing Parameters → System | SO, RAM, CPU, GPU(s) | `core.system_info` (detecção real de hardware) | 1 (já disponível) |
+
+### Regra de honestidade do relatório
+
+Qualquer campo cuja fase produtora ainda não foi implementada é exibido
+explicitamente como **"Não disponível — calculado na Fase N"**, nunca como
+zero, `null` silencioso ou um valor inventado. Isso é obrigatório para
+respeitar a regra 3 do briefing ("não diga que algo possui precisão
+centimétrica sem validação"). O relatório do HTRMapper cresce
+incrementalmente: a cada fase implementada, mais seções passam de
+"pendente" para valores reais.
+
+### Implementado nesta rodada (fundação do relatório, Fase 1)
+
+- `geo.gsd`: estimativa de GSD (cm/pixel) a partir de altitude, focal
+  length e a largura do sensor **derivada do fator de crop**
+  (`sensor_width_mm = 36mm / crop_factor`, `crop_factor =
+  focal_length_35mm_equiv / focal_length_mm`) — evita depender de um banco
+  de dados de sensores por modelo de câmera, que nem sempre está
+  disponível/atualizado.
+- `geo.coverage`: área de cobertura por hull convexo das posições de
+  câmera no CRS do projeto (aproximação pré-alinhamento; a área real do
+  ortomosaico substitui isso na Fase 6).
+- `core.system_info`: detecção real de CPU, RAM, GPU NVIDIA/CUDA e VRAM
+  (via `nvidia-smi`, com fallback correto quando não há GPU).
+- `core.report`: modelo de dados do relatório completo (todas as seções
+  da tabela acima) e um renderizador HTML que popula o que já é
+  calculável na Fase 1 e marca o resto como pendente, com a fase exata
+  que o produzirá.
+
+## 12. Fase 1 — o que está implementado neste commit
 
 - `core.project`: modelo de projeto (`Project`, `ImageRecord`,
   `GnssAccuracyConfig`) serializável em JSON, com versionamento de schema,
@@ -253,3 +316,6 @@ htrmapper/
   parsing XMP DJI, importação de pasta (incluindo imagens sem GPS),
   transformação de CRS (valores conhecidos), pesos GNSS, e
   save/load de projeto.
+- `geo.gsd`, `geo.coverage`, `core.system_info`, `core.report`: fundação
+  do relatório de qualidade (ver seção 11 acima), incluindo exportação
+  HTML via `htrmapper import --report-out relatorio.html`.

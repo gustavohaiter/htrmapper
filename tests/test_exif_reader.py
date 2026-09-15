@@ -52,6 +52,7 @@ def test_camera_and_focal_length_metadata(tmp_path: Path):
     assert exif.camera_make == "DJI"
     assert exif.camera_model == "M3M"
     assert exif.focal_length_mm == pytest.approx(12.29, abs=0.01)
+    assert exif.focal_length_35mm_equiv == pytest.approx(spec.focal_length_35mm_equiv_mm, abs=0.5)
     assert exif.pixel_width == spec.width
     assert exif.pixel_height == spec.height
 

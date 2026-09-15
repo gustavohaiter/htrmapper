@@ -104,6 +104,7 @@ def build_image_record(image_path: Path) -> ImageRecord:
         longitude=exif.longitude,
         altitude=exif.altitude,
         position_valid=exif.position_is_valid,
+        relative_altitude_m=dji.relative_altitude_m,
         gimbal_yaw_deg=dji.gimbal_yaw_deg,
         gimbal_pitch_deg=dji.gimbal_pitch_deg,
         gimbal_roll_deg=dji.gimbal_roll_deg,

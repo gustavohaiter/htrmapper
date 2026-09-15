@@ -27,6 +27,13 @@ Implementado nesta fase:
 - CLI (`htrmapper import <pasta> ...`) para uso sem GUI / automação.
 - Visualizador desktop mínimo (PySide6): tabela de imagens + mapa real de
   posições de câmera no CRS do projeto.
+- Relatório de processamento (HTML), com a mesma estrutura de um relatório
+  Metashape (Survey Data, Camera Calibration, Camera Locations, DEM,
+  Orthomosaic, Processing Parameters, System) — ver `ARCHITECTURE.md`
+  seção 11 para o mapeamento campo a campo. Tudo que ainda depende de
+  fases futuras (tie points, bundle adjustment, nuvem densa, DEM,
+  ortomosaico) aparece explicitamente como **"Não disponível — calculado
+  na Fase N"**, nunca como zero ou valor inventado.
 
 ## Instalação (desenvolvimento)
 
@@ -42,7 +49,8 @@ pip install -e ".[gui,dev]"
 htrmapper import /caminho/para/imagens \
     --epsg 31983 \
     --xy-sigma 0.02 --z-sigma 0.02 \
-    --project-out projeto.json
+    --project-out projeto.json \
+    --report-out relatorio.html
 ```
 
 ## Uso — GUI

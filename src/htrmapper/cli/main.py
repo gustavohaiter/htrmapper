@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from htrmapper.core.project import GnssAccuracyConfig, Project, ProjectCrsConfig
+from htrmapper.core.report import build_report_from_project, render_html
 from htrmapper.geo.crs import CoordinateReferenceSystem
 from htrmapper.gnss.accuracy import CameraAccuracy
 from htrmapper.io.image_import import import_folder
@@ -42,17 +43,23 @@ def _cmd_import(args: argparse.Namespace) -> int:
     for line in report.summary_lines():
         print(line)
 
+    project = Project(
+        name=args.name or folder.name,
+        crs=ProjectCrsConfig(source_epsg=4326, project_epsg=args.epsg),
+        gnss_accuracy=GnssAccuracyConfig(
+            accuracy=CameraAccuracy(xy_sigma_m=args.xy_sigma, z_sigma_m=args.z_sigma)
+        ),
+        images=records,
+    )
+
     if args.project_out:
-        project = Project(
-            name=args.name or folder.name,
-            crs=ProjectCrsConfig(source_epsg=4326, project_epsg=args.epsg),
-            gnss_accuracy=GnssAccuracyConfig(
-                accuracy=CameraAccuracy(xy_sigma_m=args.xy_sigma, z_sigma_m=args.z_sigma)
-            ),
-            images=records,
-        )
         project.save(Path(args.project_out))
         print(f"\nProject saved to: {args.project_out}")
+
+    if args.report_out:
+        report = build_report_from_project(project)
+        Path(args.report_out).write_text(render_html(report), encoding="utf-8")
+        print(f"Report saved to: {args.report_out}")
 
     return 0
 
@@ -70,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser.add_argument("--z-sigma", type=float, default=0.02, help="GNSS/PPK vertical accuracy, meters")
     import_parser.add_argument("--name", default=None, help="Project name (default: folder name)")
     import_parser.add_argument("--project-out", default=None, help="Path to save the .json project file")
+    import_parser.add_argument("--report-out", default=None, help="Path to save the HTML processing report")
     import_parser.set_defaults(func=_cmd_import)
 
     return parser

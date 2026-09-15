@@ -36,6 +36,13 @@ class ImageRecord:
     altitude: float | None = None
     position_valid: bool = False
 
+    # Height above the takeoff point / ground, as reported by the drone's
+    # own flight controller (drone-dji:RelativeAltitude in XMP). This is
+    # the correct "flying height" for GSD estimation -- unlike the EXIF
+    # GPS altitude, which is typically MSL/ellipsoidal and includes the
+    # terrain elevation itself, not the height above it.
+    relative_altitude_m: float | None = None
+
     # Orientation (degrees). Gimbal = actual camera orientation (preferred
     # for exterior orientation); flight = aircraft body orientation.
     gimbal_yaw_deg: float | None = None

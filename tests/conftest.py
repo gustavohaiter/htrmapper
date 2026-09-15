@@ -33,6 +33,7 @@ class SyntheticImageSpec:
     flight_pitch_deg: float = 1.2
     flight_roll_deg: float = -0.3
     focal_length_mm: float = 12.29
+    focal_length_35mm_equiv_mm: float = 24.0
     camera_make: str = "DJI"
     camera_model: str = "M3M"
     timestamp: str = "2025:07:10 09:15:30"
@@ -64,6 +65,7 @@ def _build_exif_bytes(spec: SyntheticImageSpec) -> bytes:
     }
     exif_ifd = {
         piexif.ExifIFD.FocalLength: (int(round(spec.focal_length_mm * 100)), 100),
+        piexif.ExifIFD.FocalLengthIn35mmFilm: int(round(spec.focal_length_35mm_equiv_mm)),
         piexif.ExifIFD.DateTimeOriginal: spec.timestamp,
         piexif.ExifIFD.PixelXDimension: spec.width,
         piexif.ExifIFD.PixelYDimension: spec.height,
