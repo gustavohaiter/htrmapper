@@ -215,6 +215,21 @@ Metodologia:
    Mitigação: usar prior GNSS/temporal para restringir pares candidatos
    (reduz falsos positivos em texturas repetitivas) e permitir overlap
    configurável mais alto para essas áreas.
+7. **Textura periódica (fileiras de plantio)** — risco distinto do item 6,
+   confirmado visualmente numa foto real de talhão compartilhada durante o
+   desenvolvimento: fileiras paralelas e repetitivas (cana, milho, soja em
+   linha) são visualmente ricas — SIFT encontra muitos keypoints — mas
+   *ambíguas*: um ponto na fileira N pode casar erroneamente com o ponto
+   equivalente na fileira N+1, gerando outliers *sistemáticos* (deslocamento
+   pequeno e consistente na direção perpendicular às fileiras), que o
+   RANSAC da verificação geométrica nem sempre rejeita bem quando o erro é
+   pequeno. Mitigação primária: o matching restrito por posição GNSS
+   (`match_spatial`, Fase 2) já reduz o espaço de busca à vizinhança
+   espacial plausível, o que descarta a maioria dos falsos candidatos
+   "fileira errada" antes mesmo da verificação geométrica. Se essa mitigação
+   se mostrar insuficiente em dados reais, o próximo recurso é reduzir
+   `spatial_max_distance_m` (menos candidatos, mais próximos) ou aumentar o
+   overlap de voo recomendado ao usuário para essas culturas.
 
 ## 9. Partes mais difíceis de igualar ao Metashape
 
