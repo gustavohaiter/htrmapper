@@ -119,7 +119,7 @@ registro que o COLMAP já criou a partir do EXIF. Isso confirmou que dá
 para usar o bundle adjustment de prior de posição **já existente no
 COLMAP** (`pycolmap.create_pose_prior_bundle_adjuster`), em vez de
 escrever uma `ceres::CostFunction` própria do zero via `pyceres` — exatamente
-a abordagem usada na implementação da Fase 3 (ver seção 15).
+a abordagem usada na implementação da Fase 3 (ver seção 14).
 
 **Resolução da dúvida em aberto (referencial da `position_covariance`):**
 como o `coordinate_system=WGS84` do COLMAP não documenta explicitamente se
@@ -132,7 +132,7 @@ Fase 2 usa para georreferenciar. Assim a covariância é inequivocamente em
 metros², no mesmo referencial em que a reconstrução já vive (alinhada
 pela Fase 2 via `align_reconstruction_to_locations`), sem depender de
 nenhuma conversão de unidade não documentada do COLMAP. Isso foi validado
-empiricamente com viés conhecido (ver seção 15).
+empiricamente com viés conhecido (ver seção 14).
 
 ## 4. Reconstrução densa (Fase 4)
 
@@ -369,7 +369,7 @@ incrementalmente: a cada fase implementada, mais seções passam de
   do relatório de qualidade (ver seção 11 acima), incluindo exportação
   HTML via `htrmapper import --report-out relatorio.html`.
 
-## 14. Fase 2 — features, matching e SfM inicial (implementada)
+## 13. Fase 2 — features, matching e SfM inicial (implementada)
 
 Construída inteiramente sobre `pycolmap` (bindings Python do COLMAP),
 conforme a decisão arquitetural da seção 1: nenhum detector de features,
@@ -438,7 +438,7 @@ GNSS batem com as posições verdadeiras conhecidas a menos de 1 metro
 features, matching restrito por GNSS, SfM incremental, e georreferenciamento
 — não apenas que o pipeline "não quebrou".
 
-## 15. Fase 3 — bundle adjustment ponderado por GNSS/PPK (implementada)
+## 14. Fase 3 — bundle adjustment ponderado por GNSS/PPK (implementada)
 
 Este é o componente mais central do projeto (ver seção 1). Implementado
 sobre o bundle adjuster de prior de posição do próprio COLMAP
@@ -498,7 +498,7 @@ observáveis.
   "Ajustar (GNSS)…", que atualiza o mapa de câmeras para mostrar as
   posições pós-ajuste.
 
-## 16. Fase 4 — nuvem de pontos densa (implementada, com limitação de ambiente)
+## 15. Fase 4 — nuvem de pontos densa (implementada, com limitação de ambiente)
 
 Construída sobre o próprio pipeline denso do COLMAP —
 `pycolmap.undistort_images` → `pycolmap.patch_match_stereo` →
@@ -555,7 +555,7 @@ sem GPU.
 - CLI: `htrmapper dense <projeto.json> --workdir <pasta> --quality media`.
   GUI: botão "Nuvem densa…".
 
-## 17. Fase 5 — geração de DEM/DSM (implementada e validada)
+## 16. Fase 5 — geração de DEM/DSM (implementada e validada)
 
 Rasteriza a nuvem de pontos densa da Fase 4 num raster de elevação
 georreferenciado. É um **DSM** (superfície, não terreno nu): a nuvem
@@ -599,7 +599,7 @@ triangulação/rasterização próprio.
 ### Validação com verdade de campo conhecida
 
 Como a Fase 4 (nuvem densa real) não pôde ser executada nesta máquina
-(sem GPU — ver seção 16), a validação da Fase 5 usa uma nuvem de pontos
+(sem GPU — ver seção 15), a validação da Fase 5 usa uma nuvem de pontos
 sintética construída diretamente a partir de uma função de terreno
 conhecida (plano suave + ondulação de baixa amplitude e grande
 comprimento de onda), amostrada com ruído realista (1cm). O DEM gerado
@@ -618,7 +618,7 @@ injetados como erro grosseiro.
 - CLI: `htrmapper dem <projeto.json> --output <dem.tif> [--resolution N] [--no-filter]`.
   GUI: botão "Gerar DEM…".
 
-## 18. Fase 6 — geração de ortomosaico (implementada e validada)
+## 17. Fase 6 — geração de ortomosaico (implementada e validada)
 
 **Isto é ortorretificação 2.5D, não true-ortho 3D completo** — declarado
 explicitamente no docstring do módulo, conforme a regra do projeto contra
@@ -720,7 +720,7 @@ ou DEM de entrada não existem.
 - CLI: `htrmapper ortho <projeto.json> --output <ortho.tif> [--feather-fraction N]`
   (requer Fase 4 e Fase 5 já executadas). GUI: botão "Gerar Ortomosaico…".
 
-## 19. Fase 7 — interface completa (implementada e validada)
+## 18. Fase 7 — interface completa (implementada e validada)
 
 Substitui a janela de página única das Fases 1-6 por uma árvore de projeto
 (`Projeto / Imagens / Câmeras / Tie Points / Point Cloud / DEM /
@@ -843,3 +843,71 @@ travar.
   (Fase 7, monitor ao vivo) somam-se a `detect_system_info()` (Fase 1,
   descrição estática de hardware para o relatório).
 - GUI: `gui/worker.py` (novo), `gui/main_window.py` (reescrito).
+
+## 19. Revisão de consistência das Fases 1-7
+
+Revisão pedida explicitamente pelo usuário após a Fase 7, comparando
+código, testes e documentação das sete fases entre si (não uma fase nova).
+Achados reais e correções aplicadas:
+
+1. **Numeração de seções deste documento**: pulava de "12" direto para
+   "14" (seção "13" nunca existiu). Conteúdo estava completo, só a
+   numeração estava errada -- corrigido renumerando 14→13 até 19→18 e
+   todas as referências cruzadas (neste arquivo e no `README.md`), exceto
+   a única referência a "seção 17 do briefing original" (documento externo
+   do usuário, não deste arquivo -- não renumerada).
+2. **`core.report`, seção "Configuração de Precisão GNSS/PPK"**: o texto
+   era um parágrafo fixo, sempre igual, dizendo "Nenhum ajuste foi
+   executado ainda" -- mesmo depois da Fase 3 já ter rodado de verdade e a
+   seção "Camera Locations" logo acima já mostrar o RMSE real do ajuste.
+   Corrigido para checar `camera_calibration.pending_phase` (o mesmo sinal
+   que a seção "Camera Calibration" já usa) e mostrar o texto certo em
+   cada caso.
+3. **`core.report`, parágrafos de "Processing Parameters"**: os parágrafos
+   de Tie Points / Depth Maps / Point Cloud / DEM / Orthomosaic usavam a
+   classe CSS `pending` (âmbar, itálico -- reservada para "não calculado
+   ainda", ver `theme.PENDING`) incondicionalmente, mesmo depois da fase
+   correspondente já ter rodado e o parágrafo mostrar um valor real
+   calculado. Corrigido com um helper (`_metric_paragraph`) que escolhe a
+   classe CSS pelo próprio `Metric.is_available`.
+4. **`core.report`, `CameraCalibration.note`**: o texto padrão dizia
+   "ainda não implementada" (bundle adjustment não implementado) quando na
+   verdade a Fase 3 já está implementada há muito tempo -- só não rodou
+   ainda *para aquele projeto*. Corrigido para "ainda não executada",
+   consistente com a linguagem usada em todo o resto do relatório (ex.
+   `aligned_cameras`: "Alinhamento (SfM) ainda não executado").
+5. **`core.project.ProjectCrsConfig.export_epsg`**: campo existia desde a
+   Fase 1, com um comentário prometendo "defaults to project_epsg if
+   None" -- mas nenhum caminho de exportação (LAS na Fase 4, GeoTIFF do
+   DEM na Fase 5) de fato o lia; todos usavam `project_epsg` diretamente,
+   então configurar um `export_epsg` diferente não tinha efeito nenhum,
+   silenciosamente. Corrigido adicionando a property
+   `effective_export_epsg` (`export_epsg` quando definido, senão
+   `project_epsg`) e trocando os pontos de chamada em `mvs.dense`, `cli`
+   e `gui` para usá-la em vez de `project_epsg` bruto.
+6. **`mvs.dense.MvsResult`**: a divisão de `undistorted_image_path` em
+   duas variáveis (`undistorted_image_path` = pasta `images/`,
+   `undistorted_reconstruction_path` = pasta `sparse/`), feita durante a
+   Fase 6/7 para a Fase 6 conseguir localizar seus insumos, nunca tinha um
+   teste confirmando que os caminhos reais em disco batem com o que
+   `pycolmap.undistort_images` de fato escreve. Adicionado um teste que
+   roda a desdistorção de verdade (sem GPU real, via
+   `monkeypatch.setattr(pycolmap, "has_cuda", True)` só para passar da
+   checagem inicial) e confirma as duas subpastas e seus conteúdos.
+7. **`core.report`, tabela de câmeras**: dentro do agrupamento por
+   `camera_model`, duas variáveis (`widths`/`heights`, os conjuntos de
+   larguras/alturas distintas no grupo) eram calculadas mas nunca lidas --
+   sinal de uma checagem que ficou incompleta. A resolução mostrada na
+   tabela vinha sempre da PRIMEIRA imagem do grupo, mesmo quando outras
+   imagens com o mesmo nome de `camera_model` tinham dimensões de pixel
+   diferentes (um problema real de qualidade de dados -- sensores
+   diferentes reportados sob o mesmo nome de modelo, ou um bug de
+   agrupamento -- escondido silenciosamente). Corrigido: quando o grupo
+   tem mais de uma largura ou altura distinta, a tabela mostra "MISTA (N
+   larguras, M alturas distintas)" em vez de um valor arbitrário.
+
+Nenhuma inconsistência encontrada nas fases 2-6 quanto à precisão
+geométrica/GNSS em si (pesos, CRS de trabalho, convenção de câmera) --
+essas já tinham sido validadas com dados sintéticos de verdade de campo
+conhecida em cada fase própria. Suíte completa (agora com os testes de
+regressão acima) re-executada sem regressão.

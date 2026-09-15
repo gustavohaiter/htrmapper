@@ -83,6 +83,34 @@ def test_raises_when_image_root_missing(tmp_path: Path):
         run_dense_reconstruction(project, reconstruction_path, tmp_path / "no_such_images", tmp_path / "work")
 
 
+def test_undistorted_paths_point_at_the_real_images_and_sparse_subfolders(tmp_path: Path, monkeypatch):
+    """Regression test for a real bug: `MvsResult.undistorted_image_path`
+    used to be set to the whole dense workspace directory (e.g.
+    `.../dense`) rather than the `images` subfolder `undistort_images`
+    actually writes images into (`.../dense/images`) -- Fase 6's
+    orthomosaic step needs the exact subfolder, not its parent, to find
+    images by name. This sandbox has no CUDA, so `patch_match_stereo`
+    (the very next call) is expected to fail -- but `undistort_images`
+    itself runs entirely on CPU (confirmed in Fase 4/6 development), so by
+    monkeypatching only the fast-fail CUDA check, undistortion still runs
+    for real and we can verify its actual on-disk output layout before the
+    (expected, unavoidable without a GPU) failure."""
+    import pycolmap
+
+    monkeypatch.setattr(pycolmap, "has_cuda", True)
+    project, reconstruction_path = _aligned_project(tmp_path)
+    workdir = tmp_path / "work_dense"
+
+    with pytest.raises(ValueError, match="CUDA"):
+        run_dense_reconstruction(project, reconstruction_path, tmp_path / "images", workdir)
+
+    dense_workspace = workdir / "dense"
+    assert (dense_workspace / "images").is_dir()
+    assert (dense_workspace / "sparse").is_dir()
+    assert any((dense_workspace / "images").iterdir())
+    assert (dense_workspace / "sparse" / "cameras.bin").exists()
+
+
 def test_raises_with_clear_message_when_no_cuda(tmp_path: Path):
     """This sandbox genuinely has no CUDA/HIP GPU (confirmed via
     pycolmap.has_cuda during development) -- this test exercises the real

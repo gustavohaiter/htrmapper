@@ -110,7 +110,7 @@ class CameraCalibrationEntry:
 
 @dataclass
 class CameraCalibration:
-    note: str = "Calibração de câmera (bundle adjustment) ainda não implementada."
+    note: str = "Calibração de câmera (bundle adjustment ponderado por GNSS) ainda não executada para este projeto."
     pending_phase: int | None = 3
     entries: list[CameraCalibrationEntry] = field(default_factory=list)
     correlation_matrix_note: str = "Matriz de correlação: não disponível nesta fase."
@@ -260,11 +260,18 @@ def build_report_from_project(project: Project) -> ProcessingReport:
     for model, imgs in sorted(by_model.items()):
         widths = {i.pixel_width for i in imgs if i.pixel_width}
         heights = {i.pixel_height for i in imgs if i.pixel_height}
-        resolution = (
-            f"{imgs[0].pixel_width} x {imgs[0].pixel_height}"
-            if imgs[0].pixel_width and imgs[0].pixel_height
-            else "-"
-        )
+        if len(widths) > 1 or len(heights) > 1:
+            # Images sharing a camera_model name but disagreeing on pixel
+            # dimensions is itself a data-quality problem (mixed sensors
+            # misreported under one model name, or a grouping bug) --
+            # reporting just the first image's resolution here would hide
+            # that silently, contradicting the project's "never hide a
+            # failure, say exactly why" rule.
+            resolution = f"MISTA ({len(widths)} larguras, {len(heights)} alturas distintas)"
+        elif imgs[0].pixel_width and imgs[0].pixel_height:
+            resolution = f"{imgs[0].pixel_width} x {imgs[0].pixel_height}"
+        else:
+            resolution = "-"
         focal_lengths = [i.focal_length_mm for i in imgs if i.focal_length_mm]
         focal_metric = Metric(value=round(mean(focal_lengths), 2), unit="mm") if focal_lengths else pending(
             1, "Focal length ausente no EXIF"
@@ -429,6 +436,19 @@ def _esc(value) -> str:
     return html.escape(str(value))
 
 
+def _metric_paragraph(metric: Metric) -> str:
+    """A `<p>` for a `Metric` whose CSS class actually matches its state.
+
+    The "pending" style (amber, italic) is reserved for values not yet
+    computed (see `theme.PENDING`'s own docstring) -- reusing it
+    unconditionally for a paragraph that, once its phase has run, shows a
+    real computed value would visually mislabel a finished result as an
+    outstanding placeholder forever.
+    """
+    css_class = "" if metric.is_available else ' class="pending"'
+    return f"<p{css_class}>{_esc(metric.render_text())}</p>"
+
+
 def render_html(report: ProcessingReport) -> str:
     survey = report.survey_data
     gnss = report.gnss_accuracy
@@ -561,7 +581,7 @@ tr:nth-child(even) td {{ background-color: {theme.SURFACE}; }}
 <tr><td>Sigma Z configurado</td><td>{gnss.z_sigma_m:.3f} m</td></tr>
 <tr><td>Imagens com desvio-padrão RTK próprio (XMP)</td><td>{gnss.images_with_per_image_rtk_std_dev} de {gnss.total_images}</td></tr>
 </table>
-<p class="pending">Estes valores serão usados como peso (1/sigma²) no bundle adjustment ponderado por GNSS (Fase 3). Nenhum ajuste foi executado ainda.</p>
+{f'<p class="pending">Estes valores serão usados como peso (1/sigma²) no bundle adjustment ponderado por GNSS (Fase 3). Nenhum ajuste foi executado ainda.</p>' if report.camera_calibration.pending_phase is not None else '<p>Estes valores foram usados como peso (1/sigma²) no bundle adjustment ponderado por GNSS (Fase 3) já executado — ver a seção Camera Locations acima para o resultado (RMSE real do ajuste).</p>'}
 </div>
 
 <div class="section">
@@ -615,15 +635,15 @@ tr:nth-child(even) td {{ background-color: {theme.SURFACE}; }}
 <tr><td>Rotation angles</td><td>{_esc(params.rotation_angles)}</td></tr>
 </table>
 <h3>Tie Points</h3>
-<p class="pending">{_esc(params.tie_points_section.render_text())}</p>
+{_metric_paragraph(params.tie_points_section)}
 <h3>Depth Maps</h3>
-<p class="pending">{_esc(params.depth_maps_section.render_text())}</p>
+{_metric_paragraph(params.depth_maps_section)}
 <h3>Point Cloud</h3>
-<p class="pending">{_esc(params.point_cloud_section.render_text())}</p>
+{_metric_paragraph(params.point_cloud_section)}
 <h3>DEM</h3>
-<p class="pending">{_esc(params.dem_section.render_text())}</p>
+{_metric_paragraph(params.dem_section)}
 <h3>Orthomosaic</h3>
-<p class="pending">{_esc(params.orthomosaic_section.render_text())}</p>
+{_metric_paragraph(params.orthomosaic_section)}
 <h3>System</h3>
 <table>
 <tr><td>OS</td><td>{_esc(params.system.os_name if params.system else '-')}</td></tr>

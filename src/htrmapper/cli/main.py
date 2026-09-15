@@ -233,7 +233,7 @@ def _cmd_dem(args: argparse.Namespace) -> int:
 
     try:
         result = run_dem_generation(
-            Path(project.mvs.point_cloud_las_path), project.crs.project_epsg, Path(args.output), config
+            Path(project.mvs.point_cloud_las_path), project.crs.effective_export_epsg, Path(args.output), config
         )
     except DemError as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -193,7 +193,7 @@ def run_dense_reconstruction(
 
     las_path = workdir / "dense_point_cloud.las"
     _report("Exportando nuvem de pontos (LAS)")
-    _export_to_las(dense_reconstruction, project.crs.project_epsg, las_path)
+    _export_to_las(dense_reconstruction, project.crs.effective_export_epsg, las_path)
 
     return MvsResult(
         num_points=len(dense_reconstruction.points3D),

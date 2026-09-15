@@ -39,7 +39,7 @@ Implementado nesta fase:
   fallback exaustivo quando há poucas posições), reconstrução incremental
   e georreferenciamento por alinhamento de similaridade às coordenadas
   GNSS. CLI: `htrmapper align`. GUI: botão "Alinhar (SfM)…". Ver
-  `ARCHITECTURE.md` seção 14 para detalhes e a validação com dados
+  `ARCHITECTURE.md` seção 13 para detalhes e a validação com dados
   sintéticos de verdade de campo conhecida.
 - **Fase 3** (bundle adjustment ponderado por GNSS/PPK — o componente
   central do projeto): refina a reconstrução da Fase 2 usando a posição
@@ -50,7 +50,7 @@ Implementado nesta fase:
   descartado — a prova de que o peso é matemático, não decorativo. CLI:
   `htrmapper adjust`. GUI: botão "Ajustar (GNSS)…". Preenche as tabelas
   "Camera Locations" (RMSE X/Y/Z/XY/Total em cm) e "Camera Calibration"
-  do relatório. Ver `ARCHITECTURE.md` seção 15.
+  do relatório. Ver `ARCHITECTURE.md` seção 14.
 - **Fase 4** (nuvem de pontos densa, sobre o pipeline denso do próprio
   COLMAP): undistort → patch-match stereo → fusão estéreo → exportação
   para **LAS** (com CRS do projeto embutido, cores reais). Níveis de
@@ -60,7 +60,7 @@ Implementado nesta fase:
   fallback de CPU nativo). O ambiente onde este projeto foi desenvolvido
   não tem GPU, então essa etapa em si (o cálculo dela) só foi validada
   quanto ao caminho de erro — a validação numérica completa depende da
-  sua RTX 3060 Ti. Ver `ARCHITECTURE.md` seção 16.
+  sua RTX 3060 Ti. Ver `ARCHITECTURE.md` seção 15.
 - **Fase 5** (DEM/DSM a partir da nuvem densa, via GDAL/`rasterio` +
   `scipy.interpolate`): filtro de outliers robusto (mediana + MAD, não
   um corte de percentil fixo — um bug real pego pelo próprio teste, ver
@@ -70,7 +70,7 @@ Implementado nesta fase:
   corretos. Validado contra uma superfície sintética de verdade
   conhecida: erro médio < 15cm, erro máximo < 50cm comparado ao valor
   real da função de terreno, não apenas "rodou sem erro". CLI:
-  `htrmapper dem`. GUI: botão "Gerar DEM…". Ver `ARCHITECTURE.md` seção 17.
+  `htrmapper dem`. GUI: botão "Gerar DEM…". Ver `ARCHITECTURE.md` seção 16.
 - **Fase 6** (ortomosaico — **2.5D**, não true-ortho 3D completo, ver
   `ARCHITECTURE.md`): reprojeta as imagens não-distorcidas da Fase 4 no
   plano do DEM da Fase 5, reaproveitando o próprio modelo de câmera do
@@ -82,7 +82,7 @@ Implementado nesta fase:
   processo que expôs e corrigiu um bug real de convenção norte-sul na
   fixture de teste compartilhada, sem afetar as fases anteriores. CLI:
   `htrmapper ortho`. GUI: botão "Gerar Ortomosaico…". Ver
-  `ARCHITECTURE.md` seção 18.
+  `ARCHITECTURE.md` seção 17.
 - **Fase 7** (interface completa): árvore de projeto (Projeto / Imagens /
   Câmeras / Tie Points / Point Cloud / DEM / Orthomosaic). Cada etapa de
   longa duração (Alinhar, Ajustar, Nuvem densa, DEM, Ortomosaico) roda em
@@ -97,7 +97,7 @@ Implementado nesta fase:
   VRAM ao vivo (atualizado a cada segundo). Testando essas duas coisas
   juntas expôs e corrigiu um deadlock real de `fork()` (chamar
   `nvidia-smi` enquanto o COLMAP tem várias threads nativas ativas). GUI:
-  `htrmapper-gui`. Ver `ARCHITECTURE.md` seção 19.
+  `htrmapper-gui`. Ver `ARCHITECTURE.md` seção 18.
 
 ## Instalação (desenvolvimento)
 

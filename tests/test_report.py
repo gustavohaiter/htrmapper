@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from htrmapper.core.project import GnssAccuracyConfig, Project, ProjectCrsConfig
+from htrmapper.core.project import BaSummary, GnssAccuracyConfig, Project, ProjectCrsConfig, SfmSummary
 from htrmapper.core.report import build_report_from_project, render_html
 from htrmapper.gnss.accuracy import CameraAccuracy
 from htrmapper.io.image_import import import_folder
@@ -85,6 +85,29 @@ def test_phase2_and_beyond_metrics_are_explicitly_pending(tmp_path: Path):
     assert not report.orthomosaic.size.is_available
 
 
+def test_camera_model_with_mixed_resolutions_is_flagged_not_silently_picked(tmp_path: Path):
+    # Regression test for dead code that looked like an unfinished check:
+    # `widths`/`heights` sets were computed per camera-model group but
+    # never actually consulted -- the resolution column just showed the
+    # FIRST image's pixel dimensions even when other images sharing that
+    # camera_model name had different ones, silently hiding a real
+    # data-quality problem (mismatched sensors under one model name, or a
+    # grouping bug).
+    make_synthetic_dji_jpeg(
+        tmp_path / "DJI_0000.JPG", SyntheticImageSpec(camera_model="M3M", width=64, height=48)
+    )
+    make_synthetic_dji_jpeg(
+        tmp_path / "DJI_0001.JPG", SyntheticImageSpec(camera_model="M3M", width=128, height=96)
+    )
+    records, _ = import_folder(tmp_path)
+    project = Project(name="mixed_res", images=records)
+
+    report = build_report_from_project(project)
+
+    assert len(report.survey_data.cameras) == 1
+    assert "MISTA" in report.survey_data.cameras[0].resolution
+
+
 def test_gnss_accuracy_summary_reflects_project_config(tmp_path: Path):
     project = _project_with_synthetic_images(tmp_path, n=3)
 
@@ -146,3 +169,43 @@ def test_empty_project_renders_without_error():
 
     assert "<html" in html_text
     assert "vazio" in html_text
+
+
+def test_gnss_section_does_not_claim_no_adjustment_ran_once_ba_has_run(tmp_path: Path):
+    # Regression test: this section's text used to be a hardcoded string
+    # claiming "Nenhum ajuste foi executado ainda" (no adjustment has run
+    # yet) unconditionally, even once a real Fase 3 (GNSS-weighted bundle
+    # adjustment) result -- with real RMSE values already shown in the
+    # Camera Locations section -- was present on the project.
+    project = _project_with_synthetic_images(tmp_path, n=3)
+    project.sfm = SfmSummary(reconstruction_path=str(tmp_path / "sparse"))
+    project.ba = BaSummary(
+        rmse_x_cm=1.0, rmse_y_cm=1.0, rmse_z_cm=1.0, rmse_xy_cm=1.4, rmse_total_cm=1.7,
+        converged=True, termination_type="CONVERGENCE", num_images_with_gnss_prior=3,
+    )
+
+    report = build_report_from_project(project)
+    html_text = render_html(report)
+
+    assert "Nenhum ajuste foi executado ainda" not in html_text
+    assert "já executado" in html_text
+
+
+def test_processing_parameters_paragraph_is_not_styled_pending_once_available(tmp_path: Path):
+    # Regression test: the Tie Points/Depth Maps/Point Cloud/DEM/
+    # Orthomosaic paragraphs under "Processing Parameters" used to always
+    # render with the amber "pending" CSS class, even once their phase had
+    # actually run and the paragraph showed a real computed value.
+    project = _project_with_synthetic_images(tmp_path, n=3)
+    project.sfm = SfmSummary(
+        reconstruction_path=str(tmp_path / "sparse"), num_points3d=100, num_observations=300,
+        matching_strategy="exhaustive",
+    )
+
+    report = build_report_from_project(project)
+
+    assert report.processing_parameters.tie_points_section.is_available
+    html_text = render_html(report)
+
+    assert '<p class="pending">100 tie points' not in html_text
+    assert "<p>100 tie points" in html_text

@@ -112,6 +112,16 @@ class ProjectCrsConfig:
     project_epsg: int = 31983  # SIRGAS 2000 / UTM zone 23S, the user's default
     export_epsg: int | None = None  # defaults to project_epsg if None
 
+    @property
+    def effective_export_epsg(self) -> int:
+        """The EPSG code every exported raster/point cloud (LAS, DEM
+        GeoTIFF) should actually be written in -- `export_epsg` when the
+        user set one, `project_epsg` otherwise. Every export call site
+        must go through this property, never read `project_epsg` directly
+        for that purpose, or a user-configured `export_epsg` silently has
+        no effect."""
+        return self.export_epsg if self.export_epsg is not None else self.project_epsg
+
     def to_dict(self) -> dict:
         return asdict(self)
 

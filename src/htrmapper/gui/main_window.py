@@ -764,7 +764,7 @@ class MainWindow(QMainWindow):
         worker = PipelineWorker(
             run_dem_generation,
             Path(self.project.mvs.point_cloud_las_path),
-            self.project.crs.project_epsg,
+            self.project.crs.effective_export_epsg,
             Path(output_path),
             DemConfig(resolution_m=resolution_m),
         )

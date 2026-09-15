@@ -49,6 +49,24 @@ def test_default_crs_is_sirgas2000_utm23s():
     assert project.crs.source_epsg == 4326
 
 
+def test_effective_export_epsg_falls_back_to_project_epsg_when_unset():
+    crs = ProjectCrsConfig(source_epsg=4326, project_epsg=31983)
+
+    assert crs.effective_export_epsg == 31983
+
+
+def test_effective_export_epsg_uses_export_epsg_when_set():
+    # Regression test: `export_epsg` used to be defined on the model (with
+    # a docstring promising it "defaults to project_epsg if None") but was
+    # never actually read by any export code path -- every LAS/DEM export
+    # silently used `project_epsg` regardless of what a user configured
+    # here. `effective_export_epsg` is the one property every export call
+    # site must go through instead.
+    crs = ProjectCrsConfig(source_epsg=4326, project_epsg=31983, export_epsg=4674)
+
+    assert crs.effective_export_epsg == 4674
+
+
 def test_future_schema_version_is_rejected(tmp_path: Path):
     project = _sample_project()
     out_path = tmp_path / "project.json"
