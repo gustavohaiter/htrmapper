@@ -962,3 +962,83 @@ pequenas (320x240) poderia revelar -- ambos corrigidos:
      detector em espaço de escala), então o teste original baseado nisso
      foi descartado por ser ele mesmo não-confiável, não só o código que
      testava.
+
+## 21. "Tie Point Limit" (Metashape) -- pesquisado, decidido não implementar agora
+
+O usuário pediu explicitamente para pesquisar como Agisoft Metashape e
+Pix4Dmapper lidam com desempenho de matching, e se valia a pena
+implementar o equivalente ao "Tie Point Limit" do Metashape. Pesquisa
+feita (documentação/comunidade das duas ferramentas) e testada
+empiricamente contra o próprio COLMAP antes de decidir -- não só lida
+como consenso de manual.
+
+**O que "Tie Point Limit" realmente é**: um corte que acontece *depois*
+do matching entre pares de imagem -- quantos pontos correspondidos ficam
+guardados por imagem, não quantos são calculados. É diferente do "Key
+Point Limit" (que já ajustamos, esse sim antes do matching). O
+equivalente direto no COLMAP é
+`pycolmap.FeatureMatchingOptions.max_num_matches` (padrão 32768).
+
+**Testado diretamente, não assumido**: matching de duas imagens sintéticas
+nas dimensões reais de drone (5280x3956, ~43000 features cada, perto do
+que fotos reais do usuário geram) variando esse limite:
+
+```
+max_num_matches=32768: 4.07s
+max_num_matches=8000:  4.02s
+max_num_matches=2000:  4.07s
+```
+
+**Zero diferença de tempo.** Faz sentido: o corte acontece depois da
+comparação de descritores (força bruta, N×M) já ter sido feita -- reduzir
+quantos pontos ficam guardados no final não evita o trabalho pesado que
+já rodou. Implementar isso agora não atacaria o problema real do usuário
+(alinhamento lento).
+
+**Onde o tempo real estava indo**: no log real do usuário, a primeira
+imagem levou 339s contra suas vizinhas espaciais, a segunda só 73s --
+não é o tempo de UM par, é o tempo de casar uma imagem contra *todos* os
+candidatos dentro do raio de busca (`spatial_max_distance_m=150m`,
+`spatial_max_neighbors`, antes 50). Contra ~7s por par (medido acima em
+condição parecida), 339s ÷ 7s ≈ 48 pares -- bate com o limite de 50
+vizinhos sendo atingido. Isso é exatamente o que Metashape (Generic/
+Reference preselection) e Pix4D (Aerial Grid or Corridor) fazem de forma
+mais inteligente: restringem os PARES candidatos usando a geometria do
+voo, não um raio genérico.
+
+**Decisão**: reduzido `spatial_max_neighbors` de 50 para **30** --
+confirmado pela própria FAQ do COLMAP ("to reduce matching pairs, decrease
+SpatialMatching.max_num_neighbors") e por exemplos publicados de pipelines
+reais usando esse mesmo valor para datasets aéreos grandes. Exposto na
+CLI (`htrmapper align --spatial-max-neighbors`) e na GUI (segundo campo no
+mesmo diálogo do limite de features). "Tie Point Limit" propriamente dito
+fica anotado como candidato à Fase 9 (controle de custo do bundle
+adjustment em datasets muito grandes, centenas de imagens), não como
+correção de desempenho agora.
+
+## 22. GPU real não detectada mesmo com hardware NVIDIA presente
+
+O usuário relatou uma RTX 3060 Ti, mas a Fase 4 (nuvem densa) falhou com
+"nenhuma GPU NVIDIA detectada" -- e o próprio log da Fase 2 já mostrava
+"Creating SIFT CPU feature extractor"/"matcher" o tempo todo, nunca GPU.
+Pesquisado antes de assumir que era um bug de detecção: **não é** -- é uma
+limitação real e documentada do pacote instalado.
+
+O `pip install pycolmap` no Windows (e em qualquer plataforma via o pacote
+`pycolmap` "normal" do PyPI) **não inclui suporte a CUDA nenhum** -- nem
+para SIFT em GPU, nem para o MVS (patch-match stereo) que a Fase 4 precisa.
+Suporte a CUDA só existe hoje via um pacote separado, `pycolmap-cuda12`,
+e só para Linux. Não existe wheel com CUDA para Windows no PyPI atualmente
+-- a única forma de ter CUDA nativo no Windows é compilar o pycolmap do
+zero (toolchain vcpkg + CUDA Toolkit + Visual Studio), um processo bem
+mais trabalhoso.
+
+**Caminho prático recomendado, se o usuário quiser usar a RTX 3060 Ti**:
+WSL2 (Windows Subsystem for Linux) com passthrough de GPU NVIDIA -- esse é
+um recurso oficial e maduro da própria NVIDIA/Microsoft (drivers Windows
+já bastam, não se instala driver Linux dentro do WSL2), com desempenho
+próximo do nativo. Dentro do WSL2 (Ubuntu, por exemplo), `pip install
+pycolmap-cuda12` funcionaria de verdade com a GPU, para SIFT em GPU e para
+a nuvem densa da Fase 4. Isso não foi implementado nem testado por nós
+(depende do ambiente do próprio usuário), só documentado como o caminho
+correto -- nunca prometemos que funcionaria sem essa mudança de ambiente.

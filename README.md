@@ -41,7 +41,13 @@ Implementado nesta fase:
   GNSS. Imagens são reduzidas para no máximo 2000px no lado maior antes da
   extração de features (`--max-image-size`, padrão validado contra fotos
   reais de 21MP — ver `ARCHITECTURE.md` seção 20 para por que esse valor
-  específico, e não um mais "redondo", é o que realmente funciona). CLI:
+  específico, e não um mais "redondo", é o que realmente funciona), e cada
+  imagem é comparada contra no máximo 30 vizinhas espaciais no matching
+  (`--spatial-max-neighbors` — o corte pós-matching que ferramentas como o
+  Metashape chamam de "Tie Point Limit" foi pesquisado e testado, mas
+  comprovadamente não afeta o tempo de matching; ver `ARCHITECTURE.md`
+  seções 21-22, que também documentam por que a Fase 4 não usa GPU mesmo
+  em máquinas com placa NVIDIA real). CLI:
   `htrmapper align`. GUI: botão "Alinhar (SfM)…". Ver `ARCHITECTURE.md`
   seção 13 para detalhes e a validação com dados sintéticos de verdade de
   campo conhecida.

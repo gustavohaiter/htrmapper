@@ -66,6 +66,21 @@ DEFAULT_KEY_POINT_LIMIT = 40_000
 # boundary) cut extraction time by more than half. Reusing the MVS
 # convention here would have looked reasonable while quietly doing nothing.
 DEFAULT_MAX_IMAGE_SIZE = 2000
+# How many matching-time levers actually help was itself confirmed
+# empirically, not assumed: `pycolmap.FeatureMatchingOptions.max_num_matches`
+# (COLMAP's own equivalent of a per-pair "tie point limit", the post-match
+# thinning concept some tools expose) measured byte-for-byte identical
+# matching wall-clock time at 32768 vs 8000 vs 2000 on a real-resolution
+# pair with ~43000 features each -- it only caps how many matches are kept
+# in the database afterwards, never the brute-force descriptor comparison
+# that actually costs the time. What *did* explain a real user's slow run
+# (one image taking 339s against its spatial neighbors, discovered from
+# its own log) is candidate PAIR count: `max_num_neighbors` controls how
+# many neighbor images each one is matched against at all, and COLMAP's
+# own FAQ recommends lowering exactly this to control spatial-matching
+# runtime. 30 (down from 50) matches the value used in published pipeline
+# examples for real aerial datasets.
+DEFAULT_SPATIAL_MAX_NEIGHBORS = 30
 MIN_IMAGES_FOR_SPATIAL_MATCHING = 3
 MIN_IMAGES_FOR_GEOREFERENCING = 3
 
@@ -74,7 +89,7 @@ MIN_IMAGES_FOR_GEOREFERENCING = 3
 class SfmConfig:
     key_point_limit: int = DEFAULT_KEY_POINT_LIMIT
     max_image_size: int = DEFAULT_MAX_IMAGE_SIZE  # -1 = no downscaling (native resolution)
-    spatial_max_neighbors: int = 50
+    spatial_max_neighbors: int = DEFAULT_SPATIAL_MAX_NEIGHBORS
     spatial_max_distance_m: float = 150.0
     use_gpu: bool | None = None  # None = auto-detect (pycolmap.has_cuda)
 

@@ -101,13 +101,18 @@ def test_align_click_asks_for_key_point_limit_and_threads_it_into_sfm_config(
     app, tmp_path: Path, monkeypatch
 ):
     # Regression test: `_on_align_clicked` used to call `SfmConfig()` with
-    # no way for a GUI user to change `key_point_limit` -- only the CLI's
-    # `--key-point-limit` flag could. On a real user flight (56 real 21MP
-    # photos) the fixed default made feature matching take minutes per
-    # image pair, and the GUI offered no way to lower it without editing
-    # code. Confirms the dialog's answer actually reaches the SfmConfig
-    # the worker runs with, not just that a dialog appears.
-    monkeypatch.setattr(QInputDialog, "getInt", staticmethod(lambda *a, **k: (12345, True)))
+    # no way for a GUI user to change `key_point_limit` or
+    # `spatial_max_neighbors` -- only the CLI's `--key-point-limit`/
+    # `--spatial-max-neighbors` flags could. On a real user flight (56 real
+    # 21MP photos) the fixed defaults made feature matching take minutes
+    # per image, and the GUI offered no way to lower either without
+    # editing code. Confirms each dialog's answer reaches the matching
+    # SfmConfig field the worker runs with, not just that a dialog
+    # appears -- two different values, in dialog call order, so a field
+    # mix-up (e.g. key_point_limit accidentally receiving the neighbors
+    # answer) would fail this test.
+    answers = iter([(12345, True), (7, True)])
+    monkeypatch.setattr(QInputDialog, "getInt", staticmethod(lambda *a, **k: next(answers)))
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(tmp_path)))
     monkeypatch.setattr(PipelineWorker, "start", lambda self: None)  # don't actually run the pipeline
 
@@ -122,6 +127,7 @@ def test_align_click_asks_for_key_point_limit_and_threads_it_into_sfm_config(
     sfm_config = window._active_worker._args[2]
     assert isinstance(sfm_config, SfmConfig)
     assert sfm_config.key_point_limit == 12345
+    assert sfm_config.spatial_max_neighbors == 7
 
 
 def test_align_worker_updates_project_and_ui(app, tmp_path: Path, monkeypatch):

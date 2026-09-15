@@ -614,6 +614,28 @@ class MainWindow(QMainWindow):
         if not ok:
             return
 
+        # Confirmed empirically (see ARCHITECTURE.md) to be the lever that
+        # actually controls matching runtime -- a post-match "keep at most
+        # N matches" cap measured zero effect on wall-clock time, because
+        # the expensive brute-force descriptor comparison already happened
+        # by then. Fewer candidate neighbor images means less comparison is
+        # attempted in the first place. COLMAP's own FAQ recommends
+        # lowering exactly this for large datasets.
+        spatial_max_neighbors, ok = QInputDialog.getInt(
+            self,
+            "Alinhamento (SfM)",
+            "Máximo de vizinhos espaciais por imagem no matching\n"
+            "(quanto menor, menos pares são testados e mais rápido fica;\n"
+            "30 é um valor de referência usado em pipelines reais de\n"
+            "fotogrametria aérea -- baixe mais se ainda estiver lento):",
+            30,
+            3,
+            200,
+            1,
+        )
+        if not ok:
+            return
+
         workdir = QFileDialog.getExistingDirectory(
             self, "Selecionar pasta de trabalho para o alinhamento (banco COLMAP, reconstrução)"
         )
@@ -621,7 +643,10 @@ class MainWindow(QMainWindow):
             return
 
         worker = PipelineWorker(
-            run_structure_from_motion, self.project, Path(workdir), SfmConfig(key_point_limit=key_point_limit)
+            run_structure_from_motion,
+            self.project,
+            Path(workdir),
+            SfmConfig(key_point_limit=key_point_limit, spatial_max_neighbors=spatial_max_neighbors),
         )
         self._start_worker(worker, "Alinhamento (SfM)", self._handle_align_result)
 

@@ -81,7 +81,11 @@ def _cmd_align(args: argparse.Namespace) -> int:
         return 1
 
     workdir = Path(args.workdir)
-    config = SfmConfig(key_point_limit=args.key_point_limit, max_image_size=args.max_image_size)
+    config = SfmConfig(
+        key_point_limit=args.key_point_limit,
+        max_image_size=args.max_image_size,
+        spatial_max_neighbors=args.spatial_max_neighbors,
+    )
 
     print(f"Aligning project: {project.name} ({len(project.images)} images)")
     print(f"Work directory: {workdir}")
@@ -350,6 +354,18 @@ def build_parser() -> argparse.ArgumentParser:
             "(default: 2000 -- see ARCHITECTURE.md's Fase 2 performance finding for why this value, "
             "not a rounder-looking one, is the one that actually engages downscaling). Real-resolution "
             "aerial photos (20+ MP) processed at native size make per-pair feature matching extremely slow."
+        ),
+    )
+    align_parser.add_argument(
+        "--spatial-max-neighbors",
+        type=int,
+        default=30,
+        help=(
+            "Max candidate neighbor images matched against each image during spatial (GNSS-restricted) "
+            "matching (default: 30, per COLMAP's own guidance for controlling matching runtime). This is "
+            "the dominant runtime lever for large overlapping flights -- unlike a post-match match-count "
+            "cap (which measured zero effect on wall-clock time; see ARCHITECTURE.md), fewer candidate "
+            "pairs means less brute-force descriptor matching is attempted at all."
         ),
     )
     align_parser.set_defaults(func=_cmd_align)

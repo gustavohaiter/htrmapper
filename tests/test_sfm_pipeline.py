@@ -119,6 +119,20 @@ def test_sfm_config_extraction_options_carries_max_image_size():
     assert SfmConfig(max_image_size=1600).extraction_options().max_image_size == 1600
 
 
+def test_default_spatial_max_neighbors_is_30_not_the_old_50():
+    # Regression test for the value itself, not just that the field
+    # exists: a post-match "keep at most N matches" cap
+    # (`FeatureMatchingOptions.max_num_matches`) measured zero effect on
+    # matching wall-clock time in direct testing (it only trims the result
+    # after the expensive brute-force comparison already ran) -- the
+    # lever that actually controls it is how many candidate neighbor
+    # images are matched against at all. COLMAP's own FAQ recommends
+    # lowering exactly this to control spatial-matching runtime; 30
+    # matches the value used in published pipeline examples for real
+    # aerial datasets.
+    assert SfmConfig().spatial_max_neighbors == 30
+
+
 def test_default_max_image_size_meaningfully_reduces_features_on_a_large_image(tmp_path: Path):
     """Regression test for a real performance bug found on a user's actual
     56-photo, 21MP (5280x3956) flight: feature matching took minutes per
