@@ -343,7 +343,13 @@ def build_parser() -> argparse.ArgumentParser:
     align_parser.add_argument("project", help="Path to a project .json file saved by 'htrmapper import'")
     align_parser.add_argument("--workdir", required=True, help="Directory for the COLMAP database/reconstruction")
     align_parser.add_argument(
-        "--key-point-limit", type=int, default=40_000, help="Max SIFT features per image (default: 40000)"
+        "--key-point-limit",
+        type=int,
+        default=40_000,
+        help=(
+            "Max SIFT features per image (default: 40000). Tiers per Metashape's own published guidance: "
+            "fast=8000, balanced=15000, precise/dense texture (e.g. crop canopy)=40000+."
+        ),
     )
     align_parser.add_argument(
         "--max-image-size",
@@ -365,7 +371,8 @@ def build_parser() -> argparse.ArgumentParser:
             "matching (default: 30, per COLMAP's own guidance for controlling matching runtime). This is "
             "the dominant runtime lever for large overlapping flights -- unlike a post-match match-count "
             "cap (which measured zero effect on wall-clock time; see ARCHITECTURE.md), fewer candidate "
-            "pairs means less brute-force descriptor matching is attempted at all."
+            "pairs means less brute-force descriptor matching is attempted at all. Tiers: fast=15, "
+            "balanced=30, robust (irregular flight/weak GNSS)=50."
         ),
     )
     align_parser.set_defaults(func=_cmd_align)

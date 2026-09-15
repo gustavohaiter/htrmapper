@@ -1016,6 +1016,18 @@ fica anotado como candidato à Fase 9 (controle de custo do bundle
 adjustment em datasets muito grandes, centenas de imagens), não como
 correção de desempenho agora.
 
+### Faixas recomendadas (GUI e `--help` da CLI)
+
+Nem inventadas, nem escolhidas por tentativa e erro -- vêm da orientação
+publicada do próprio Metashape (key point limit) e da FAQ/exemplos
+publicados do COLMAP (spatial max neighbors), citadas acima.
+
+| Perfil | Key point limit | Spatial max neighbors | Quando usar |
+|---|---|---|---|
+| Rápido | 8.000 | 15 | Voo em grade regular, boa sobreposição, GNSS confiável, prioridade em velocidade |
+| Padrão | 15.000 | 30 | Uso geral -- padrão atual da GUI |
+| Preciso / textura densa | 40.000+ | 50 | Vegetação/dossel/cultivo denso (como o caso do usuário), voo irregular, ou GNSS menos confiável -- prioridade em redundância, não em velocidade |
+
 ## 22. GPU real não detectada mesmo com hardware NVIDIA presente
 
 O usuário relatou uma RTX 3060 Ti, mas a Fase 4 (nuvem densa) falhou com

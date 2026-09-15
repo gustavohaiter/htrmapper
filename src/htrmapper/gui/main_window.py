@@ -599,13 +599,20 @@ class MainWindow(QMainWindow):
         # This was previously only adjustable via the CLI's
         # --key-point-limit; exposing it here too so a GUI user isn't
         # stuck with a value that makes a real dataset impractically slow.
+        # Tiers below are grounded in Metashape's own published guidance
+        # (key point limit: 20000-100000 range, 60000-80000 recommended
+        # specifically for complex/dense texture like crop canopy) and
+        # COLMAP's own FAQ + published pipeline examples (spatial
+        # neighbors: reduce to control runtime, 30 is a commonly used real
+        # value) -- see ARCHITECTURE.md's Fase 2 performance findings for
+        # the full research and the direct measurements behind them, never
+        # picked arbitrarily.
         key_point_limit, ok = QInputDialog.getInt(
             self,
             "Alinhamento (SfM)",
             "Limite de features SIFT por imagem\n"
-            "(menor = mais rápido, porém menos redundância para o ajuste;\n"
-            "para voos com muitas fotos e boa sobreposição, 10000-20000 costuma\n"
-            "bastar -- 40000+ pode deixar o matching muito lento em fotos reais):",
+            "(menor = mais rápido, porém menos redundância para o ajuste):\n"
+            "  Rápido: 8000   |   Padrão: 15000   |   Preciso/textura densa: 40000+",
             15000,
             1000,
             100_000,
@@ -625,9 +632,9 @@ class MainWindow(QMainWindow):
             self,
             "Alinhamento (SfM)",
             "Máximo de vizinhos espaciais por imagem no matching\n"
-            "(quanto menor, menos pares são testados e mais rápido fica;\n"
-            "30 é um valor de referência usado em pipelines reais de\n"
-            "fotogrametria aérea -- baixe mais se ainda estiver lento):",
+            "(menor = menos pares testados, mais rápido, porém menos\n"
+            "redundância para voos irregulares ou GNSS menos confiável):\n"
+            "  Rápido: 15   |   Padrão: 30   |   Robusto: 50",
             30,
             3,
             200,
