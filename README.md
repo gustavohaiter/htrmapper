@@ -133,10 +133,13 @@ htrmapper ortho projeto.json --output ortho.tif
 htrmapper-gui
 ```
 
-No Windows, depois da instalação inicial, dá para abrir a GUI com um único
-duplo-clique em `run_gui.bat` (ou rodando `run_gui.bat` no `cmd`, dentro da
-pasta do projeto) — ele ativa o `.venv` automaticamente antes de chamar
-`htrmapper-gui`.
+No Windows, dá para abrir a GUI com um único duplo-clique em `run_gui.bat`
+(ou rodando `run_gui.bat` no `cmd`, dentro da pasta do projeto) — ele cria
+o `.venv` se ainda não existir, ativa e roda `pip install -e ".[gui,dev]"`
+sempre (não só na primeira vez, para captar automaticamente uma
+dependência nova de uma fase mais recente num `.venv` criado antes dela —
+ex. `pycolmap` da Fase 2), antes de chamar `htrmapper-gui`. Depois de um
+`git pull`, é só rodar `run_gui.bat` de novo normalmente.
 
 ## Testes
 
