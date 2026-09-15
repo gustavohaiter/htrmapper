@@ -59,6 +59,11 @@ htrmapper import /caminho/para/imagens \
 htrmapper-gui
 ```
 
+No Windows, depois da instalação inicial, dá para abrir a GUI com um único
+duplo-clique em `run_gui.bat` (ou rodando `run_gui.bat` no `cmd`, dentro da
+pasta do projeto) — ele ativa o `.venv` automaticamente antes de chamar
+`htrmapper-gui`.
+
 ## Testes
 
 Toda a suíte usa dados sintéticos (JPEGs com EXIF + XMP DJI fabricados em
