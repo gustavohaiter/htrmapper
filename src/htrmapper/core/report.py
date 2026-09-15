@@ -201,8 +201,7 @@ def _render_camera_position_map_png(
         formatter = ScalarFormatter(useOffset=False)
         formatter.set_scientific(False)
         axis.set_major_formatter(formatter)
-    ax.tick_params(axis="y", labelrotation=90)
-    ax.tick_params(colors=theme.TEXT_MUTED)
+    ax.tick_params(colors=theme.TEXT_MUTED, labelsize=8)
     for spine in ax.spines.values():
         spine.set_color(theme.BORDER)
     ax.grid(True, linewidth=0.3, color=theme.BORDER)

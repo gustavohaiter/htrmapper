@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 import rasterio
 from PySide6.QtCore import QEventLoop, QTimer
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox
 from rasterio.transform import from_origin
 
 from htrmapper.core.project import DemSummary, MvsSummary, OrthoSummary, Project, ProjectCrsConfig
@@ -95,6 +95,33 @@ def test_import_enables_downstream_buttons_and_populates_table(app, tmp_path: Pa
     assert window.align_button.isEnabled() is True
     assert window.save_project_button.isEnabled() is True
     assert window.adjust_button.isEnabled() is False  # no SfM result yet
+
+
+def test_align_click_asks_for_key_point_limit_and_threads_it_into_sfm_config(
+    app, tmp_path: Path, monkeypatch
+):
+    # Regression test: `_on_align_clicked` used to call `SfmConfig()` with
+    # no way for a GUI user to change `key_point_limit` -- only the CLI's
+    # `--key-point-limit` flag could. On a real user flight (56 real 21MP
+    # photos) the fixed default made feature matching take minutes per
+    # image pair, and the GUI offered no way to lower it without editing
+    # code. Confirms the dialog's answer actually reaches the SfmConfig
+    # the worker runs with, not just that a dialog appears.
+    monkeypatch.setattr(QInputDialog, "getInt", staticmethod(lambda *a, **k: (12345, True)))
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(tmp_path)))
+    monkeypatch.setattr(PipelineWorker, "start", lambda self: None)  # don't actually run the pipeline
+
+    generate_synthetic_flight(tmp_path / "images")
+    records, _report = import_folder(tmp_path / "images")
+    window = MainWindow(Project(name="teste", images=records))
+    window._sync_ui_to_project_state()
+
+    window._on_align_clicked()
+
+    assert window._active_worker is not None
+    sfm_config = window._active_worker._args[2]
+    assert isinstance(sfm_config, SfmConfig)
+    assert sfm_config.key_point_limit == 12345
 
 
 def test_align_worker_updates_project_and_ui(app, tmp_path: Path, monkeypatch):

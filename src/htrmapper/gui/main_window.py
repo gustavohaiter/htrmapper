@@ -589,13 +589,40 @@ class MainWindow(QMainWindow):
         if not self.project.images:
             QMessageBox.warning(self, "Alinhamento (SfM)", "Importe imagens primeiro.")
             return
+
+        # Feature-matching cost grows much faster than linearly with the
+        # number of keypoints per image -- on a real user flight (56
+        # overlapping 21MP photos), the previous fixed 40000 limit still
+        # matched at 60000+ keypoints/image (COLMAP's cap is approximate,
+        # not hard -- see ARCHITECTURE.md's Fase 2 performance finding) and
+        # some image pairs took 5+ minutes each to match on CPU alone.
+        # This was previously only adjustable via the CLI's
+        # --key-point-limit; exposing it here too so a GUI user isn't
+        # stuck with a value that makes a real dataset impractically slow.
+        key_point_limit, ok = QInputDialog.getInt(
+            self,
+            "Alinhamento (SfM)",
+            "Limite de features SIFT por imagem\n"
+            "(menor = mais rápido, porém menos redundância para o ajuste;\n"
+            "para voos com muitas fotos e boa sobreposição, 10000-20000 costuma\n"
+            "bastar -- 40000+ pode deixar o matching muito lento em fotos reais):",
+            15000,
+            1000,
+            100_000,
+            1000,
+        )
+        if not ok:
+            return
+
         workdir = QFileDialog.getExistingDirectory(
             self, "Selecionar pasta de trabalho para o alinhamento (banco COLMAP, reconstrução)"
         )
         if not workdir:
             return
 
-        worker = PipelineWorker(run_structure_from_motion, self.project, Path(workdir), SfmConfig())
+        worker = PipelineWorker(
+            run_structure_from_motion, self.project, Path(workdir), SfmConfig(key_point_limit=key_point_limit)
+        )
         self._start_worker(worker, "Alinhamento (SfM)", self._handle_align_result)
 
     def _handle_align_result(self, result) -> None:
@@ -1026,14 +1053,15 @@ class MainWindow(QMainWindow):
         # default matplotlib shows them as a small offset ("+7.548e6") plus
         # short relative tick labels, which hides the real coordinate
         # value. Show the real, full number on every tick instead (never a
-        # value the user can't read off directly), rotated vertically so
-        # those wider labels don't eat into the plot area.
+        # value the user can't read off directly); kept horizontal (a
+        # first version rotated the labels 90 degrees to save width, but
+        # that read worse in practice) with a slightly smaller font so the
+        # wider full numbers still fit without crowding the plot.
         for axis in (self.cameras_axes.xaxis, self.cameras_axes.yaxis):
             formatter = ScalarFormatter(useOffset=False)
             formatter.set_scientific(False)
             axis.set_major_formatter(formatter)
-        self.cameras_axes.tick_params(axis="y", labelrotation=90)
-        self.cameras_axes.tick_params(colors=theme.TEXT_MUTED)
+        self.cameras_axes.tick_params(colors=theme.TEXT_MUTED, labelsize=8)
         for spine in self.cameras_axes.spines.values():
             spine.set_color(theme.BORDER)
         self.cameras_axes.grid(True, linewidth=0.3, color=theme.BORDER)
