@@ -67,3 +67,34 @@ def test_import_folder_empty_directory(tmp_path: Path):
     assert records == []
     assert report.total_images == 0
     assert report.num_with_valid_position == 0
+
+
+def test_short_summary_reports_success_when_no_problems(tmp_path: Path):
+    make_synthetic_dji_jpeg(tmp_path / "good1.jpg", SyntheticImageSpec(latitude=-15.0, longitude=-47.0))
+    make_synthetic_dji_jpeg(tmp_path / "good2.jpg", SyntheticImageSpec(latitude=-15.1, longitude=-47.1))
+
+    _, report = import_folder(tmp_path)
+
+    assert not report.has_problems
+    assert "sem problemas" in report.short_summary()
+    assert "2 imagens" in report.short_summary()
+
+
+def test_short_summary_flags_missing_position(tmp_path: Path):
+    make_synthetic_dji_jpeg(tmp_path / "good.jpg", SyntheticImageSpec(latitude=-15.0, longitude=-47.0))
+    make_synthetic_dji_jpeg(tmp_path / "no_gps.jpg", SyntheticImageSpec(include_gps=False))
+
+    _, report = import_folder(tmp_path)
+
+    assert report.has_problems
+    summary = report.short_summary()
+    assert "avisos" in summary
+    assert "1 sem posição GPS" in summary
+
+
+def test_short_summary_empty_folder():
+    from htrmapper.io.image_import import ImportReport
+
+    report = ImportReport(total_images=0)
+
+    assert "Nenhuma imagem" in report.short_summary()

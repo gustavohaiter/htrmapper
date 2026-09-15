@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 
 from htrmapper.core import theme
 from htrmapper.core.project import ImageRecord, Project
+from htrmapper.core.report import build_report_from_project, render_html
 from htrmapper.geo.crs import (
     CoordinateReferenceSystem,
     GeodeticPoint,
@@ -106,6 +107,8 @@ class MainWindow(QMainWindow):
         self._build_ui()
         if self.project.images:
             self._refresh(self.project.images)
+            self.save_project_button.setEnabled(True)
+            self.generate_report_button.setEnabled(True)
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -116,6 +119,17 @@ class MainWindow(QMainWindow):
         open_button = QPushButton("Importar pasta de imagens…")
         open_button.clicked.connect(self._on_import_clicked)
         toolbar.addWidget(open_button)
+
+        self.save_project_button = QPushButton("Salvar projeto…")
+        self.save_project_button.setEnabled(False)
+        self.save_project_button.clicked.connect(self._on_save_project_clicked)
+        toolbar.addWidget(self.save_project_button)
+
+        self.generate_report_button = QPushButton("Gerar relatório…")
+        self.generate_report_button.setEnabled(False)
+        self.generate_report_button.clicked.connect(self._on_generate_report_clicked)
+        toolbar.addWidget(self.generate_report_button)
+
         self.status_label = QLabel("Nenhum projeto carregado.")
         self.status_label.setObjectName("statusLabel")
         toolbar.addWidget(self.status_label)
@@ -154,11 +168,35 @@ class MainWindow(QMainWindow):
             return
         self.project.images = records
         self._refresh(records)
-        QMessageBox.information(
-            self,
-            "Importação concluída",
-            "\n".join(report.summary_lines()),
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Importação concluída")
+        box.setIcon(QMessageBox.Icon.Warning if report.has_problems else QMessageBox.Icon.Information)
+        box.setText(report.short_summary())
+        box.setDetailedText("\n".join(report.summary_lines()))
+        box.exec()
+
+        self.save_project_button.setEnabled(True)
+        self.generate_report_button.setEnabled(True)
+
+    def _on_save_project_clicked(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Salvar projeto", f"{self.project.name}.json", "Projeto HTRMapper (*.json)"
         )
+        if not path:
+            return
+        self.project.save(Path(path))
+        QMessageBox.information(self, "Projeto salvo", f"Projeto salvo em:\n{path}")
+
+    def _on_generate_report_clicked(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Gerar relatório", f"{self.project.name}_relatorio.html", "Relatório HTML (*.html)"
+        )
+        if not path:
+            return
+        report = build_report_from_project(self.project)
+        Path(path).write_text(render_html(report), encoding="utf-8")
+        QMessageBox.information(self, "Relatório gerado", f"Relatório salvo em:\n{path}")
 
     def _refresh(self, records: list[ImageRecord]) -> None:
         self.status_label.setText(f"{len(records)} imagem(ns) carregada(s).")

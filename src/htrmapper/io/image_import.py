@@ -42,6 +42,50 @@ class ImportReport:
             self.images_with_invalid_position
         )
 
+    @property
+    def has_problems(self) -> bool:
+        return bool(
+            self.errors
+            or self.images_without_position
+            or self.images_with_invalid_position
+            or self.images_without_orientation
+            or self.images_without_focal_length
+        )
+
+    def short_summary(self) -> str:
+        """One/two-line status for a quick "did it work?" glance.
+
+        Full detail (per-field counts, per-file errors) stays in
+        `summary_lines()` for whoever wants to dig in -- this is only the
+        headline: OK, or what specifically went wrong.
+        """
+        if self.total_images == 0:
+            return "Nenhuma imagem suportada (JPG/TIFF) encontrada na pasta."
+
+        if not self.has_problems:
+            return (
+                f"Importação concluída sem problemas: {self.total_images} imagens, "
+                f"todas com posição GPS válida."
+            )
+
+        problems = []
+        if self.errors:
+            problems.append(f"{len(self.errors)} com erro de leitura")
+        if self.images_without_position:
+            problems.append(f"{len(self.images_without_position)} sem posição GPS")
+        if self.images_with_invalid_position:
+            problems.append(f"{len(self.images_with_invalid_position)} com posição GPS inválida")
+        if self.images_without_orientation:
+            problems.append(f"{len(self.images_without_orientation)} sem orientação do gimbal")
+        if self.images_without_focal_length:
+            problems.append(f"{len(self.images_without_focal_length)} sem focal length")
+
+        return (
+            f"Importação concluída com avisos ({self.total_images} imagens): "
+            + "; ".join(problems)
+            + ". Veja \"Show Details\" para a lista completa."
+        )
+
     def summary_lines(self) -> list[str]:
         lines = [
             f"Total images found: {self.total_images}",
