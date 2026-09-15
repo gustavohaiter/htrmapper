@@ -8,7 +8,7 @@ arquitetura, bibliotecas, riscos e o plano de fases.
 Foco atual do usuário: DJI Mavic 3M, imagens já geotaggeadas via PPK,
 SIRGAS 2000 / UTM 23S (EPSG:31983), agricultura sem GCP.
 
-## Status: Fase 1 + Fase 2 (importação + features/matching/SfM inicial)
+## Status: Fase 1 + 2 + 3 (importação, SfM inicial, bundle adjustment ponderado por GNSS)
 
 Implementado nesta fase:
 
@@ -41,6 +41,16 @@ Implementado nesta fase:
   GNSS. CLI: `htrmapper align`. GUI: botão "Alinhar (SfM)…". Ver
   `ARCHITECTURE.md` seção 14 para detalhes e a validação com dados
   sintéticos de verdade de campo conhecida.
+- **Fase 3** (bundle adjustment ponderado por GNSS/PPK — o componente
+  central do projeto): refina a reconstrução da Fase 2 usando a posição
+  GNSS de cada câmera como observação com peso `1/sigma²` derivado da
+  `CameraAccuracy` configurada — nunca como âncora fixa. Validado
+  injetando um viés de GNSS conhecido: com sigma apertado a solução segue
+  o GNSS; com sigma frouxo, a reprojeção domina e o GNSS ruim é
+  descartado — a prova de que o peso é matemático, não decorativo. CLI:
+  `htrmapper adjust`. GUI: botão "Ajustar (GNSS)…". Preenche as tabelas
+  "Camera Locations" (RMSE X/Y/Z/XY/Total em cm) e "Camera Calibration"
+  do relatório. Ver `ARCHITECTURE.md` seção 15.
 
 ## Instalação (desenvolvimento)
 
@@ -60,6 +70,8 @@ htrmapper import /caminho/para/imagens \
     --report-out relatorio.html
 
 htrmapper align projeto.json --workdir ./work --key-point-limit 40000
+
+htrmapper adjust projeto.json --workdir ./work_ba
 ```
 
 ## Uso — GUI
@@ -85,8 +97,7 @@ pytest -q
 
 ## Próximas fases
 
-Ver `ARCHITECTURE.md`, seção "Priorização do desenvolvimento": Fase 3
-(bundle adjustment ponderado por GNSS), Fase 4 (nuvem densa), Fase 5
-(DEM), Fase 6 (ortomosaico), Fase 7 (interface completa), Fase 8
-(validação quantitativa contra o Metashape), Fase 9 (otimização de
-performance/GPU).
+Ver `ARCHITECTURE.md`, seção "Priorização do desenvolvimento": Fase 4
+(nuvem densa), Fase 5 (DEM), Fase 6 (ortomosaico), Fase 7 (interface
+completa), Fase 8 (validação quantitativa contra o Metashape), Fase 9
+(otimização de performance/GPU).

@@ -11,6 +11,7 @@ from htrmapper.core.report import build_report_from_project, render_html
 from htrmapper.geo.crs import CoordinateReferenceSystem
 from htrmapper.gnss.accuracy import CameraAccuracy
 from htrmapper.io.image_import import import_folder
+from htrmapper.ba.weighted_bundle_adjustment import BaConfig, BaError, run_gnss_weighted_bundle_adjustment
 from htrmapper.sfm.pipeline import SfmConfig, SfmError, run_structure_from_motion
 
 
@@ -113,6 +114,48 @@ def _cmd_align(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_adjust(args: argparse.Namespace) -> int:
+    project_path = Path(args.project)
+    if not project_path.is_file():
+        print(f"error: project file not found: {project_path}", file=sys.stderr)
+        return 1
+
+    project = Project.load(project_path)
+    if project.sfm is None or not project.sfm.reconstruction_path:
+        print("error: project has no Fase 2 (SfM) result; run 'htrmapper align' first", file=sys.stderr)
+        return 1
+
+    workdir = Path(args.workdir)
+    config = BaConfig(refine_intrinsics=args.refine_intrinsics)
+
+    print(f"Adjusting project: {project.name}")
+    print(f"GNSS accuracy: xy={project.gnss_accuracy.accuracy.xy_sigma_m} m, z={project.gnss_accuracy.accuracy.z_sigma_m} m")
+    print()
+
+    try:
+        result = run_gnss_weighted_bundle_adjustment(project, Path(project.sfm.reconstruction_path), workdir, config)
+    except BaError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Termination: {result.termination_type} (converged: {result.converged})")
+    print(f"Images adjusted: {result.num_images_adjusted} ({result.num_images_with_gnss_prior} with GNSS prior)")
+    print(f"Mean reprojection error (final, GNSS-weighted): {result.mean_reprojection_error_px:.4f} px")
+    print(
+        f"GNSS residual RMSE: X={result.rmse_x_cm:.3f} cm, Y={result.rmse_y_cm:.3f} cm, "
+        f"Z={result.rmse_z_cm:.3f} cm, XY={result.rmse_xy_cm:.3f} cm, Total={result.rmse_total_cm:.3f} cm"
+    )
+    print(f"Max error: {result.max_error_cm:.3f} cm")
+    for camera_id, data in result.camera_calibration.items():
+        print(f"Camera {camera_id} ({data['model']}, {data['params_info']}): {data['params']}")
+
+    project.ba = result.to_project_summary()
+    project.save(project_path)
+    print(f"\nProject updated: {project_path}")
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="htrmapper", description="HTRMapper photogrammetry CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -138,6 +181,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--key-point-limit", type=int, default=40_000, help="Max SIFT features per image (default: 40000)"
     )
     align_parser.set_defaults(func=_cmd_align)
+
+    adjust_parser = subparsers.add_parser(
+        "adjust", help="Fase 3: bundle adjustment ponderado por GNSS/PPK (requires 'htrmapper align' first)"
+    )
+    adjust_parser.add_argument("project", help="Path to a project .json file with a Fase 2 (align) result")
+    adjust_parser.add_argument("--workdir", required=True, help="Directory for the refined reconstruction")
+    adjust_parser.add_argument(
+        "--refine-intrinsics",
+        action="store_true",
+        help="Also refine focal length/principal point/distortion (risky for nadir-only flat flights; see BaConfig docstring)",
+    )
+    adjust_parser.set_defaults(func=_cmd_adjust)
 
     return parser
 

@@ -113,20 +113,26 @@ e uma classe `PosePriorBundleAdjustmentOptions`/`CeresPosePriorBundleAdjustmentO
 covariância** já existe dentro do Ceres embutido no COLMAP.
 
 Validamos experimentalmente que dá para sobrescrever a covariância desse
-`PosePrior` com a nossa própria (`CameraAccuracy.weight_matrix()` invertida)
-via `Database.update_pose_prior()`, no mesmo registro que o COLMAP já criou
-a partir do EXIF. Isso muda a avaliação de risco da Fase 3 para melhor: em
-vez de necessariamente escrever uma `ceres::CostFunction` própria do zero
-via `pyceres`, a primeira abordagem a validar na Fase 3 é usar o bundle
-adjustment de prior de posição **já existente no COLMAP**, alimentado com a
-nossa matriz de peso — e só partir para uma cost function própria em Ceres
-se essa abordagem não permitir o controle fino que o projeto exige (ex.:
-covariância anisotrópica alinhada ao referencial local ENU da câmera, não
-apenas WGS84/Cartesian genérico). Ainda não confirmamos em que referencial
-exato (ENU local vs. geográfico) o COLMAP espera a `position_covariance`
-quando `coordinate_system=WGS84` — isso é o primeiro item a investigar/testar
-antes de usar essa via em produção, precisamente para não fazer suposição
-errada de unidade que comprometeria a precisão (regra 3 do briefing).
+`PosePrior` com a nossa própria (`CameraAccuracy` convertida para
+`diag(σ_xy², σ_xy², σ_z²)`) via `Database.update_pose_prior()`, no mesmo
+registro que o COLMAP já criou a partir do EXIF. Isso confirmou que dá
+para usar o bundle adjustment de prior de posição **já existente no
+COLMAP** (`pycolmap.create_pose_prior_bundle_adjuster`), em vez de
+escrever uma `ceres::CostFunction` própria do zero via `pyceres` — exatamente
+a abordagem usada na implementação da Fase 3 (ver seção 15).
+
+**Resolução da dúvida em aberto (referencial da `position_covariance`):**
+como o `coordinate_system=WGS84` do COLMAP não documenta explicitamente se
+a covariância é interpretada em graus² ou metros² quando convertida
+internamente, a decisão de projeto foi **não depender dessa conversão
+implícita**. A Fase 3 constrói os `PosePrior` sempre com
+`coordinate_system=CARTESIAN`, com a posição já transformada para o CRS
+do projeto (metros) pelo nosso próprio `geo.crs` — o mesmo transform que a
+Fase 2 usa para georreferenciar. Assim a covariância é inequivocamente em
+metros², no mesmo referencial em que a reconstrução já vive (alinhada
+pela Fase 2 via `align_reconstruction_to_locations`), sem depender de
+nenhuma conversão de unidade não documentada do COLMAP. Isso foi validado
+empiricamente com viés conhecido (ver seção 15).
 
 ## 4. Reconstrução densa (Fase 4)
 
@@ -431,3 +437,63 @@ GNSS batem com as posições verdadeiras conhecidas a menos de 1 metro
 (na prática, submilimétrico). Isso valida de ponta a ponta: extração de
 features, matching restrito por GNSS, SfM incremental, e georreferenciamento
 — não apenas que o pipeline "não quebrou".
+
+## 15. Fase 3 — bundle adjustment ponderado por GNSS/PPK (implementada)
+
+Este é o componente mais central do projeto (ver seção 1). Implementado
+sobre o bundle adjuster de prior de posição do próprio COLMAP
+(`pycolmap.create_pose_prior_bundle_adjuster`), descoberto e validado na
+Fase 2 (seção 3) — não uma cost function própria em Ceres via `pyceres`,
+que era o plano original antes desse achado.
+
+- `ba.weighted_bundle_adjustment.run_gnss_weighted_bundle_adjustment`:
+  carrega a reconstrução já georreferenciada da Fase 2, constrói um
+  `PosePrior` por câmera com `coordinate_system=CARTESIAN` (posição no CRS
+  do projeto, via `geo.crs`, nunca WGS84 direto — ver seção 3) e
+  `position_covariance = diag(σ_xy², σ_xy², σ_z²)` a partir da
+  `CameraAccuracy` do projeto. Roda o solver e devolve o resíduo GNSS
+  por câmera (posição ajustada − posição GNSS) e o RMSE X/Y/Z/XY/Total em
+  centímetros — exatamente os campos que faltavam na tabela "Camera
+  Locations" do relatório.
+
+### Validação decisiva: o peso é matemático, não decorativo
+
+Testado injetando um viés conhecido (5 m) na posição GNSS de uma câmera e
+rodando o ajuste com duas configurações de `CameraAccuracy`:
+
+- **Sigma apertado (0,02 m)**: a posição resolvida ficou a poucos
+  centímetros da observação GNSS (errada) — o peso dominou.
+- **Sigma frouxo (5,0 m)**: a maior parte do viés de 5 m permaneceu como
+  resíduo não absorvido — a reprojeção dominou, o GNSS ruim foi
+  corretamente desconfiado.
+
+Isso é exatamente o comportamento de uma observação ponderada (Gauss-
+Markov), nunca uma âncora rígida — a exigência central do briefing (regras
+4, 5 e 6). Ver `tests/test_weighted_bundle_adjustment.py`.
+
+### Achado durante a validação: degenerescência de autocalibração em voo nadir plano
+
+Ao permitir refinar `f, cx, cy` simultaneamente com o prior de posição
+GNSS numa cena sintética plana e nadir (altitude constante, sem imagens
+oblíquas), a focal length divergiu de ~232px para 580-710px, mesmo com o
+erro de reprojeção continuando baixo (~0,06px) — uma degenerescência
+clássica de autocalibração fotogramétrica: para uma cena plana, `f` e a
+elevação (não observada) dos tie points são conjuntamente não-identificáveis,
+e um prior de posição de câmera não resolve isso porque não restringe a
+elevação da cena. Fixar os intrínsecos (mantendo os já refinados pela
+Fase 2) convergiu de forma limpa e estável. Por isso `BaConfig.refine_intrinsics`
+é `False` por padrão — só deve ser ligado quando o voo tem diversidade
+geométrica real (imagens oblíquas, altitude variável, GCPs), conforme a
+regra do briefing de não otimizar parâmetros sem evidência de que são
+observáveis.
+
+- `core.report`: quando `project.ba` existe, preenche "Camera Locations"
+  (RMSE X/Y/Z/XY/Total em cm) e "Camera Calibration" (parâmetros do
+  modelo de câmera pós-ajuste), e o "Reprojection error (final, ponderado
+  por GNSS)" da Survey Data — mantido distinto do valor inicial da Fase 2.
+  A matriz de correlação dos coeficientes de calibração (como no relatório
+  Metashape de referência) ainda não está implementada — fica marcada
+  como tal, nunca inventada.
+- CLI: `htrmapper adjust <projeto.json> --workdir <pasta>`. GUI: botão
+  "Ajustar (GNSS)…", que atualiza o mapa de câmeras para mostrar as
+  posições pós-ajuste.

@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from htrmapper.ba.weighted_bundle_adjustment import BaConfig, BaError, run_gnss_weighted_bundle_adjustment
 from htrmapper.core import theme
 from htrmapper.core.project import ImageRecord, Project
 from htrmapper.core.report import build_report_from_project, render_html
@@ -112,6 +113,8 @@ class MainWindow(QMainWindow):
             self.save_project_button.setEnabled(True)
             self.generate_report_button.setEnabled(True)
             self.align_button.setEnabled(True)
+            if self.project.sfm is not None and self.project.sfm.reconstruction_path:
+                self.adjust_button.setEnabled(True)
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -137,6 +140,11 @@ class MainWindow(QMainWindow):
         self.align_button.setEnabled(False)
         self.align_button.clicked.connect(self._on_align_clicked)
         toolbar.addWidget(self.align_button)
+
+        self.adjust_button = QPushButton("Ajustar (GNSS)…")
+        self.adjust_button.setEnabled(False)
+        self.adjust_button.clicked.connect(self._on_adjust_clicked)
+        toolbar.addWidget(self.adjust_button)
 
         self.status_label = QLabel("Nenhum projeto carregado.")
         self.status_label.setObjectName("statusLabel")
@@ -255,6 +263,56 @@ class MainWindow(QMainWindow):
         if result.georeferenced:
             self._plot_aligned_positions(result.reconstruction_path)
         self.status_label.setText(f"{len(self.project.images)} imagem(ns) carregada(s). Alinhamento executado.")
+        self.adjust_button.setEnabled(True)
+
+    def _on_adjust_clicked(self) -> None:
+        if self.project.sfm is None or not self.project.sfm.reconstruction_path:
+            QMessageBox.warning(self, "Ajuste (GNSS)", "Execute o alinhamento (SfM) primeiro.")
+            return
+
+        workdir = QFileDialog.getExistingDirectory(
+            self, "Selecionar pasta de trabalho para o ajuste (reconstrução refinada)"
+        )
+        if not workdir:
+            return
+
+        self.setCursor(Qt.CursorShape.WaitCursor)
+        self.status_label.setText("Ajustando (bundle adjustment ponderado por GNSS)...")
+        QApplication.processEvents()
+        try:
+            result = run_gnss_weighted_bundle_adjustment(
+                self.project, Path(self.project.sfm.reconstruction_path), Path(workdir), BaConfig()
+            )
+        except BaError as exc:
+            self.unsetCursor()
+            QMessageBox.critical(self, "Falha no ajuste", str(exc))
+            return
+        finally:
+            self.unsetCursor()
+
+        self.project.ba = result.to_project_summary()
+
+        short = (
+            f"Ajuste concluído: RMSE total {result.rmse_total_cm:.3f} cm "
+            f"({result.num_images_with_gnss_prior} câmeras com observação GNSS), "
+            f"erro de reprojeção final {result.mean_reprojection_error_px:.3f} px."
+        )
+        detail_lines = [
+            f"Termination: {result.termination_type} (converged: {result.converged})",
+            f"RMSE X={result.rmse_x_cm:.3f} cm, Y={result.rmse_y_cm:.3f} cm, Z={result.rmse_z_cm:.3f} cm",
+            f"RMSE XY={result.rmse_xy_cm:.3f} cm, Total={result.rmse_total_cm:.3f} cm",
+            f"Max error: {result.max_error_cm:.3f} cm",
+        ]
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Ajuste (GNSS)")
+        box.setIcon(QMessageBox.Icon.Information if result.converged else QMessageBox.Icon.Warning)
+        box.setText(short)
+        box.setDetailedText("\n".join(detail_lines))
+        box.exec()
+
+        self._plot_aligned_positions(result.reconstruction_path, label="ajustado (GNSS ponderado)")
+        self.status_label.setText(f"{len(self.project.images)} imagem(ns) carregada(s). Ajuste GNSS executado.")
 
     def _refresh(self, records: list[ImageRecord]) -> None:
         self.status_label.setText(f"{len(records)} imagem(ns) carregada(s).")
@@ -292,7 +350,7 @@ class MainWindow(QMainWindow):
 
         self._plot_points(xs, ys, f"Posições das câmeras — GNSS bruto ({len(xs)} válidas)")
 
-    def _plot_aligned_positions(self, reconstruction_path: str) -> None:
+    def _plot_aligned_positions(self, reconstruction_path: str, label: str = "SfM alinhado") -> None:
         import pycolmap
 
         reconstruction = pycolmap.Reconstruction(reconstruction_path)
@@ -302,7 +360,7 @@ class MainWindow(QMainWindow):
             xs.append(float(center[0]))
             ys.append(float(center[1]))
 
-        self._plot_points(xs, ys, f"Posições das câmeras — SfM alinhado ({len(xs)} registradas)")
+        self._plot_points(xs, ys, f"Posições das câmeras — {label} ({len(xs)} registradas)")
 
     def _plot_points(self, xs: list[float], ys: list[float], title: str) -> None:
         self.axes.clear()

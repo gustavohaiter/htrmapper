@@ -153,6 +153,40 @@ class SfmSummary:
 
 
 @dataclass
+class BaSummary:
+    """Persisted summary of a Phase 3 (GNSS-weighted bundle adjustment) run.
+
+    The GNSS residual RMSE fields are what the "Camera Locations" section
+    of the processing report needs; `camera_calibration` is what "Camera
+    Calibration" needs. The full refined reconstruction stays on disk at
+    `reconstruction_path` (COLMAP format) for Phase 4 (dense reconstruction).
+    """
+
+    num_images_adjusted: int = 0
+    num_images_with_gnss_prior: int = 0
+    rmse_x_cm: float | None = None
+    rmse_y_cm: float | None = None
+    rmse_z_cm: float | None = None
+    rmse_xy_cm: float | None = None
+    rmse_total_cm: float | None = None
+    max_error_cm: float | None = None
+    mean_reprojection_error_px: float | None = None
+    num_residuals: int = 0
+    termination_type: str = ""
+    converged: bool = False
+    reconstruction_path: str = ""
+    camera_calibration: dict = field(default_factory=dict)
+    ran_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "BaSummary":
+        return cls(**data)
+
+
+@dataclass
 class Project:
     """Top-level project state, serializable to/from a JSON project file."""
 
@@ -163,6 +197,7 @@ class Project:
     gnss_accuracy: GnssAccuracyConfig = field(default_factory=GnssAccuracyConfig)
     images: list[ImageRecord] = field(default_factory=list)
     sfm: SfmSummary | None = None
+    ba: BaSummary | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -173,6 +208,7 @@ class Project:
             "gnss_accuracy": self.gnss_accuracy.to_dict(),
             "images": [img.to_dict() for img in self.images],
             "sfm": self.sfm.to_dict() if self.sfm else None,
+            "ba": self.ba.to_dict() if self.ba else None,
         }
 
     @classmethod
@@ -184,6 +220,7 @@ class Project:
                 f"htrmapper build supports (max {SCHEMA_VERSION}); upgrade htrmapper"
             )
         sfm_data = data.get("sfm")
+        ba_data = data.get("ba")
         return cls(
             name=data["name"],
             created_at=data.get("created_at", datetime.now().isoformat()),
@@ -192,6 +229,7 @@ class Project:
             gnss_accuracy=GnssAccuracyConfig.from_dict(data["gnss_accuracy"]),
             images=[ImageRecord.from_dict(img) for img in data.get("images", [])],
             sfm=SfmSummary.from_dict(sfm_data) if sfm_data else None,
+            ba=BaSummary.from_dict(ba_data) if ba_data else None,
         )
 
     def save(self, path: Path) -> None:

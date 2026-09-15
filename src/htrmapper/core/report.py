@@ -101,9 +101,19 @@ class SurveyData:
 
 
 @dataclass
+class CameraCalibrationEntry:
+    camera_id: str
+    model: str
+    params_info: str
+    params: list[float]
+
+
+@dataclass
 class CameraCalibration:
     note: str = "Calibração de câmera (bundle adjustment) ainda não implementada."
-    pending_phase: int = 3
+    pending_phase: int | None = 3
+    entries: list[CameraCalibrationEntry] = field(default_factory=list)
+    correlation_matrix_note: str = "Matriz de correlação: não disponível nesta fase."
 
 
 @dataclass
@@ -321,11 +331,50 @@ def build_report_from_project(project: Project) -> ProcessingReport:
             )
         )
 
+    camera_locations = CameraLocations()
+    camera_calibration = CameraCalibration()
+
+    if project.ba is not None:
+        ba = project.ba
+        camera_locations = CameraLocations(
+            x_error_cm=Metric(value=round(ba.rmse_x_cm, 4), unit="cm") if ba.rmse_x_cm is not None else pending(3),
+            y_error_cm=Metric(value=round(ba.rmse_y_cm, 4), unit="cm") if ba.rmse_y_cm is not None else pending(3),
+            z_error_cm=Metric(value=round(ba.rmse_z_cm, 4), unit="cm") if ba.rmse_z_cm is not None else pending(3),
+            xy_error_cm=Metric(value=round(ba.rmse_xy_cm, 4), unit="cm") if ba.rmse_xy_cm is not None else pending(3),
+            total_error_cm=(
+                Metric(value=round(ba.rmse_total_cm, 4), unit="cm") if ba.rmse_total_cm is not None else pending(3)
+            ),
+        )
+        if ba.mean_reprojection_error_px is not None:
+            survey.reprojection_error_px = Metric(
+                value=round(ba.mean_reprojection_error_px, 4),
+                unit="pix (final, bundle adjustment ponderado por GNSS)",
+            )
+        entries = [
+            CameraCalibrationEntry(
+                camera_id=camera_id,
+                model=data["model"],
+                params_info=data["params_info"],
+                params=[round(p, 6) for p in data["params"]],
+            )
+            for camera_id, data in ba.camera_calibration.items()
+        ]
+        camera_calibration = CameraCalibration(
+            note=(
+                f"Convergiu: {ba.converged} ({ba.termination_type}). "
+                f"{ba.num_images_with_gnss_prior} câmera(s) com observação GNSS ponderada."
+            ),
+            pending_phase=None,
+            entries=entries,
+        )
+
     return ProcessingReport(
         project_name=project.name,
         survey_data=survey,
         gnss_accuracy=gnss_summary,
         processing_parameters=params,
+        camera_locations=camera_locations,
+        camera_calibration=camera_calibration,
     )
 
 
@@ -343,6 +392,12 @@ def render_html(report: ProcessingReport) -> str:
         f"<td>{_esc(c.focal_length_mm.render_text())}</td><td>{_esc(c.pixel_size_um.render_text())}</td>"
         f"<td>{_esc(c.precalibrated)}</td></tr>"
         for c in survey.cameras
+    )
+
+    calibration_rows = "\n".join(
+        f"<tr><td>{_esc(e.camera_id)}</td><td>{_esc(e.model)}</td><td>{_esc(e.params_info)}</td>"
+        f"<td>{_esc(', '.join(f'{p:.6g}' for p in e.params))}</td></tr>"
+        for e in report.camera_calibration.entries
     )
 
     map_html = ""
@@ -464,7 +519,12 @@ tr:nth-child(even) td {{ background-color: {theme.SURFACE}; }}
 
 <div class="section">
 <h2>Camera Calibration</h2>
-<p class="pending">{_esc(report.camera_calibration.note)} (Fase {report.camera_calibration.pending_phase})</p>
+{f'<p class="pending">{_esc(report.camera_calibration.note)} (Fase {report.camera_calibration.pending_phase})</p>' if report.camera_calibration.pending_phase is not None else f'<p>{_esc(report.camera_calibration.note)}</p>'}
+{f'''<table>
+<tr><th>Câmera</th><th>Modelo</th><th>Parâmetros</th><th>Valores</th></tr>
+{calibration_rows}
+</table>
+<p class="pending">{_esc(report.camera_calibration.correlation_matrix_note)}</p>''' if report.camera_calibration.entries else ''}
 </div>
 
 <div class="section">
