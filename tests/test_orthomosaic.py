@@ -190,6 +190,37 @@ def test_automatic_resolution_matches_known_camera_gsd(tmp_path: Path):
     assert result.resolution_m == pytest.approx(spec.gsd_m_per_px, rel=0.1)
 
 
+def test_tile_size_never_changes_the_output_pixel_for_pixel(tmp_path: Path, monkeypatch):
+    # Regression test for the tiled-rendering rewrite (real bug found
+    # 2026-10-07: the previous whole-grid implementation OOM-killed on a
+    # real ~168-million-pixel flight once the resolution-decoupling fix
+    # above made the orthomosaic render near native image GSD). Tiling
+    # must be purely an implementation/memory detail -- a tiny tile size
+    # (forcing many tile boundaries to cross right through the covered
+    # area) must produce a byte-for-byte identical raster to one giant
+    # tile (the old, whole-grid-at-once behavior), proving no seam or
+    # edge artifact is introduced at tile boundaries.
+    import htrmapper.ortho.orthomosaic as orthomosaic_module
+
+    spec, terrain, images_dir, reconstruction_path, dem_path = _setup_ground_truth_scene(tmp_path)
+
+    monkeypatch.setattr(orthomosaic_module, "TILE_SIZE_PX", 100_000)
+    whole_grid_result = run_orthomosaic_generation(
+        reconstruction_path, images_dir, dem_path, tmp_path / "ortho_whole.tif"
+    )
+
+    monkeypatch.setattr(orthomosaic_module, "TILE_SIZE_PX", 8)
+    tiled_result = run_orthomosaic_generation(reconstruction_path, images_dir, dem_path, tmp_path / "ortho_tiled.tif")
+
+    assert tiled_result.width_px == whole_grid_result.width_px
+    assert tiled_result.height_px == whole_grid_result.height_px
+    assert tiled_result.num_valid_pixels == whole_grid_result.num_valid_pixels
+    assert tiled_result.num_cameras_used == whole_grid_result.num_cameras_used
+
+    with rasterio.open(whole_grid_result.raster_path) as whole_src, rasterio.open(tiled_result.raster_path) as tiled_src:
+        assert np.array_equal(whole_src.read(), tiled_src.read())
+
+
 def test_explicit_resolution_overrides_automatic_estimate(tmp_path: Path):
     spec, terrain, images_dir, reconstruction_path, dem_path = _setup_ground_truth_scene(tmp_path)
 

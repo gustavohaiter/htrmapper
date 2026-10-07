@@ -32,8 +32,9 @@ from PySide6.QtCore import QThread, Signal
 
 class PipelineWorker(QThread):
     # A phase label (coarse, COLMAP-backed stages) or a real (done, total)
-    # count (Fase 6's own per-camera loop) -- never both on one signal, so
-    # each carries an unambiguous, real value, never a fabricated percentage.
+    # count (Fase 6's own per-tile loop -- see ortho.orthomosaic) -- never
+    # both on one signal, so each carries an unambiguous, real value, never
+    # a fabricated percentage.
     phase_changed = Signal(str)
     progress_changed = Signal(int, int)
     finished_ok = Signal(object)

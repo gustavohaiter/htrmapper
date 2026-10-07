@@ -113,7 +113,18 @@ def test_orthomosaic_pre_cancelled_token_raises_interrupted_error(tmp_path: Path
         )
 
 
-def test_orthomosaic_progress_callback_reports_every_camera(tmp_path: Path):
+def test_orthomosaic_progress_callback_reports_every_tile(tmp_path: Path, monkeypatch):
+    """Progress is reported per output tile (see ARCHITECTURE.md's
+    2026-10-07 tiled-rendering fix), not per camera -- a camera can
+    contribute to several tiles, and a tile can need several cameras, so
+    per-tile is the real, finest-grained unit of work this pipeline does.
+    A tiny TILE_SIZE_PX forces several tiles here (the synthetic scene
+    would otherwise fit in a single one), so the test actually exercises
+    multiple, strictly increasing progress calls rather than trivially
+    just one."""
+    import htrmapper.ortho.orthomosaic as orthomosaic_module
+
+    monkeypatch.setattr(orthomosaic_module, "TILE_SIZE_PX", 8)
     reconstruction_path, images_dir, dem_path = _setup_ortho_scene(tmp_path)
     calls: list[tuple[int, int]] = []
 
@@ -121,9 +132,10 @@ def test_orthomosaic_progress_callback_reports_every_camera(tmp_path: Path):
         reconstruction_path, images_dir, dem_path, tmp_path / "out.tif", progress_callback=lambda done, total: calls.append((done, total))
     )
 
-    assert len(calls) == 6  # one call per registered camera in the synthetic scene
-    assert calls[-1] == (6, 6)
-    assert [c[0] for c in calls] == [1, 2, 3, 4, 5, 6]
+    assert len(calls) > 1
+    assert calls[-1][0] == calls[-1][1]
+    assert [c[0] for c in calls] == list(range(1, len(calls) + 1))
+    assert all(c[1] == calls[-1][1] for c in calls)
 
 
 class _FakeCancellationToken:

@@ -801,6 +801,55 @@ CLI: nova flag `--resolution`. GUI: novo diálogo de resolução no botão
 real saiu com densidade baixa (~1-3 pontos/m², quando MVS tipicamente
 entrega dezenas a centenas).
 
+### Bug real encontrado no mesmo dia (2026-10-07), consequência direta do fix acima: sem memória (OOM) na resolução nativa
+
+Corrigir o acoplamento de resolução (acima) teve uma consequência real não
+antecipada: numa área fotografada real de ~341m x ~303m a ~2,7cm/px, a
+grade de saída do ortomosaico passou a ter **~168 milhões de pixels**
+(contra ~14 mil pixels do bug antigo). A implementação de então montava
+várias matrizes `float64` do tamanho da grade **inteira** simultaneamente
+(cor acumulada, peso, coordenadas de mundo, elevação) — e o processo foi
+morto pelo OOM killer do Linux ao tentar rodar isso de verdade no PC do
+usuário. Esse é exatamente o tipo de problema de escala que só aparece
+processando dados reais de tamanho real — nunca apareceria nas cenas
+sintéticas de teste (pequenas de propósito).
+
+**Correção**: `run_orthomosaic_generation` agora processa o raster de
+saída **em blocos/tiles** (`TILE_SIZE_PX = 2048`, nunca exposto como
+configuração do usuário por enquanto), a mesma técnica que Pix4D/
+Metashape usam — nunca mantêm o ortomosaico inteiro em RAM de uma vez.
+Para cada tile: calcula só as coordenadas/elevação desse pedaço,
+acumula cor/peso só nesse pedaço, escreve via `rasterio` com janela
+(`Window`) direto no GeoTIFF, descarta tudo antes do próximo tile. Pico
+de memória fica limitado ao tamanho do tile, nunca ao tamanho total da
+saída.
+
+Para não testar as 56 câmeras contra cada um dos ~42 tiles sem
+necessidade, cada câmera registrada tem sua pegada aproximada no solo
+pré-calculada **uma vez**, reprojetando a grade do DEM (pequena, nativa)
+através dela — reaproveitando a mesma matemática de projeção do loop
+principal, só que sobre poucos pontos em vez de milhões — e usada como
+filtro barato de bounding-box por tile (o teste preciso pixel a pixel só
+roda para as câmeras cujo bounding-box realmente sobrepõe o tile).
+
+**Validado**: um teste de regressão roda a mesma cena sintética duas
+vezes — uma com `TILE_SIZE_PX` forçado para um valor gigante (um único
+tile, equivalente ao comportamento antigo) e outra forçado para 8
+(centenas de tiles minúsculos) — e confirma que o GeoTIFF resultante é
+**idêntico byte a byte** nos dois casos. Isso prova que o tiling é só um
+detalhe de implementação/memória, nunca muda o resultado nem introduz
+costuras nas bordas dos blocos.
+
+**Limite ainda conhecido, não resolvido**: as imagens-fonte decodificadas
+(câmera → array RGB) ficam em cache em memória pelo resto da execução,
+assim que uma câmera é usada pela primeira vez — correto e barato para
+um voo de dezenas de fotos (ex. os 56 da fazenda 20046, ~3,5GB no pior
+caso), mas cresceria sem limite para um voo de centenas/milhares de fotos
+de alta resolução. Não implementado ainda (um cache com despejo
+tipo LRU resolveria) porque não é o cenário de uso atual do usuário
+(talhões pequenos/médios de cana) — documentado aqui para não ser
+esquecido se um voo bem maior aparecer no futuro.
+
 ## 18. Fase 7 — interface completa (implementada e validada)
 
 Substitui a janela de página única das Fases 1-6 por uma árvore de projeto

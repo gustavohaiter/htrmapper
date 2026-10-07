@@ -99,8 +99,12 @@ Implementado nesta fase:
   saiu ~100x mais grosseiro que a resolução nativa das fotos): por padrão
   é estimada a partir da altura real de cada câmera acima do terreno e da
   distância focal calibrada, nunca reaproveitando a grade do DEM
-  diretamente. CLI: `htrmapper ortho [--resolution N]`. GUI: botão "Gerar
-  Ortomosaico…". Ver `ARCHITECTURE.md` seção 17.
+  diretamente. **Processado em blocos/tiles** (mesma técnica do Pix4D/
+  Metashape — outro bug real corrigido no mesmo dia: em resolução nativa
+  sobre uma área real, a grade passou a ter ~168 milhões de pixels e a
+  implementação antiga, de uma vez só, estourou a memória). CLI:
+  `htrmapper ortho [--resolution N]`. GUI: botão "Gerar Ortomosaico…". Ver
+  `ARCHITECTURE.md` seção 17.
 - **Fase 7** (interface completa): árvore de projeto (Projeto / Imagens /
   Câmeras / Tie Points / Point Cloud / DEM / Orthomosaic). Cada etapa de
   longa duração (Alinhar, Ajustar, Nuvem densa, DEM, Ortomosaico) roda em

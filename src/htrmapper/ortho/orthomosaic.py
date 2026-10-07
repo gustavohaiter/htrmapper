@@ -54,11 +54,33 @@ instead of showing a hard edge. This is a documented, simple blending
 strategy; graph-cut seamline optimization (what mature commercial tools
 use to avoid blending across moving objects/parallax errors) is not
 implemented here.
+
+**Processed in tiles, never as one whole-grid array in RAM** (real bug
+found and fixed on 2026-10-07, same day as the resolution-decoupling fix
+above and the direct cause of it: once the orthomosaic rendered near
+native image GSD instead of the DEM's coarse resolution, a real 56-photo
+flight's output grid grew to ~168 million pixels, and the previous
+single-pass implementation held several full-grid float64 arrays (color
+accumulator, weight accumulator, world coordinates, elevation) in memory
+simultaneously -- OOM-killed on the user's own machine on first real use
+at native resolution). Professional tools (Pix4D/Metashape) never hold a
+whole large orthomosaic in RAM either; they process it in blocks. This
+module now does the same: the output raster is split into fixed-size
+tiles (`TILE_SIZE_PX`), and for each tile only that tile's world
+coordinates/elevation/accumulators are ever materialized, written to the
+GeoTIFF via a windowed write, then discarded before the next tile. Peak
+memory is therefore bounded by tile size, never by total output size.
+To avoid every camera being tested against every tile (correct but
+wasteful), each registered camera's approximate ground footprint is
+precomputed once up front (by reprojecting the DEM's own, much smaller,
+native-resolution grid through that camera -- reusing the same camera
+projection math, just applied to fewer points) and used as a cheap
+bounding-box pre-filter per tile.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -68,6 +90,7 @@ import rasterio
 import rasterio.transform
 from PIL import Image as PILImage
 from rasterio.transform import from_origin
+from rasterio.windows import Window
 from scipy.interpolate import RegularGridInterpolator
 
 # Width of the feathering zone, as a fraction of the source image's
@@ -77,6 +100,16 @@ from scipy.interpolate import RegularGridInterpolator
 # unremarkable default for edge feathering -- large enough to visibly
 # smooth seams, small enough not to discard most of small, single images.
 FEATHER_FRACTION = 0.1
+
+# Tile side length, in output pixels. 2048x2048 keeps every per-tile
+# float64 array well under a few hundred MB (2048*2048*3*8 bytes = 100MB
+# for the color accumulator alone, the largest one) regardless of how
+# large the full orthomosaic is -- the entire point of tiling. Not
+# exposed as user config for now: it only trades a little overhead
+# (re-testing camera candidates per tile) for memory headroom, and 2048
+# is a safe, unremarkable default (also GDAL's own common internal tiling
+# block size).
+TILE_SIZE_PX = 2048
 
 
 class OrthoError(RuntimeError):
@@ -199,15 +232,13 @@ def _estimate_resolution_from_cameras(
     return float(np.median(estimates))
 
 
-def _build_output_grid(
-    dem_transform: rasterio.Affine, dem_width: int, dem_height: int, dem_elevation: np.ndarray, resolution_m: float
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, rasterio.Affine]:
-    """Build the orthomosaic's own output grid at `resolution_m`, covering
-    the same ground footprint (bounding box) as the DEM, and resample the
-    DEM's elevation surface onto it (bilinear, via
-    `scipy.interpolate.RegularGridInterpolator`) -- never reusing the DEM's
-    own pixel grid directly, which is the coupling bug this function exists
-    to fix (see module docstring).
+def _output_geometry(
+    dem_transform: rasterio.Affine, dem_width: int, dem_height: int, resolution_m: float
+) -> tuple[int, int, rasterio.Affine]:
+    """Compute the orthomosaic's output raster shape/transform at
+    `resolution_m`, covering the same ground footprint (bounding box) as
+    the DEM -- pure arithmetic, no array allocation, so this is cheap to
+    call even when the resulting grid is hundreds of millions of pixels.
     """
     min_x = dem_transform.c
     max_y = dem_transform.f
@@ -216,27 +247,100 @@ def _build_output_grid(
 
     width_px = max(1, int(np.ceil((max_x - min_x) / resolution_m)))
     height_px = max(1, int(np.ceil((max_y - min_y) / resolution_m)))
+    transform = from_origin(min_x, max_y, resolution_m, resolution_m)
+    return width_px, height_px, transform
 
-    col_centers = min_x + (np.arange(width_px) + 0.5) * resolution_m
-    row_centers = max_y - (np.arange(height_px) + 0.5) * resolution_m
-    world_x, world_y = np.meshgrid(col_centers, row_centers)
+
+def _build_dem_interpolator(
+    dem_transform: rasterio.Affine, dem_width: int, dem_height: int, dem_elevation: np.ndarray
+) -> RegularGridInterpolator:
+    """Build a reusable (row, col) -> elevation interpolator over the DEM's
+    own (small, native-resolution) grid -- built once, then evaluated per
+    output tile, never re-built per tile and never evaluated over the
+    whole (potentially huge) output grid at once.
+    """
+    min_x = dem_transform.c
+    max_y = dem_transform.f
 
     # RegularGridInterpolator requires strictly ascending axes; the DEM's
     # row axis is north-up (descending in world-Y), so flip both the axis
-    # and the elevation rows to match before interpolating.
+    # and the elevation rows to match.
     dem_col_centers = min_x + (np.arange(dem_width) + 0.5) * dem_transform.a
     dem_row_centers_desc = max_y + (np.arange(dem_height) + 0.5) * dem_transform.e
     dem_row_centers_asc = dem_row_centers_desc[::-1]
     elevation_asc = dem_elevation[::-1, :]
 
-    interpolator = RegularGridInterpolator(
+    return RegularGridInterpolator(
         (dem_row_centers_asc, dem_col_centers), elevation_asc, method="linear", bounds_error=False, fill_value=np.nan
     )
-    query = np.stack([world_y.ravel(), world_x.ravel()], axis=1)
-    elevation = interpolator(query).reshape(world_y.shape)
 
-    transform = from_origin(min_x, max_y, resolution_m, resolution_m)
-    return world_x, world_y, elevation, transform
+
+def _camera_footprint_bbox(
+    image: "pycolmap.Image", dem_world_x: np.ndarray, dem_world_y: np.ndarray, dem_elevation: np.ndarray
+) -> tuple[float, float, float, float] | None:
+    """Approximate a registered camera's ground footprint, as a world-space
+    bounding box (min_x, max_x, min_y, max_y), by reprojecting the DEM's
+    own native-resolution grid through it -- the same projection math as
+    the main per-tile loop, just applied once to the DEM's (much smaller)
+    grid instead of per-tile to the (potentially huge) output grid. Used
+    only as a cheap per-tile candidate pre-filter, never as the final
+    per-pixel visibility test -- a coarse DEM cell near the camera's true
+    edge could make this bbox slightly too tight or too loose, which is
+    fine for a pre-filter but would not be for the real test. Returns None
+    if the camera sees no DEM terrain at all (never a candidate for any
+    tile).
+    """
+    valid_terrain = ~np.isnan(dem_elevation)
+    if not np.any(valid_terrain):
+        return None
+
+    xs = dem_world_x[valid_terrain]
+    ys = dem_world_y[valid_terrain]
+    zs = dem_elevation[valid_terrain]
+    world_points = np.stack([xs, ys, zs], axis=1)
+
+    camera = image.camera
+    cam_points = image.cam_from_world() * world_points
+    pixel_coords = camera.img_from_cam(cam_points, check_cheirality=True)
+    u, v = pixel_coords[:, 0], pixel_coords[:, 1]
+    valid = ~np.isnan(u) & (u >= 0) & (u <= camera.width - 1) & (v >= 0) & (v <= camera.height - 1)
+    if not np.any(valid):
+        return None
+
+    return float(xs[valid].min()), float(xs[valid].max()), float(ys[valid].min()), float(ys[valid].max())
+
+
+def _bbox_overlaps(
+    a: tuple[float, float, float, float], b: tuple[float, float, float, float], margin: float
+) -> bool:
+    a_min_x, a_max_x, a_min_y, a_max_y = a
+    b_min_x, b_max_x, b_min_y, b_max_y = b
+    return not (
+        a_max_x + margin < b_min_x
+        or a_min_x - margin > b_max_x
+        or a_max_y + margin < b_min_y
+        or a_min_y - margin > b_max_y
+    )
+
+
+def _iter_tiles(
+    width_px: int, height_px: int, transform: rasterio.Affine, tile_size: int
+) -> Iterator[tuple[int, int, int, int, np.ndarray, np.ndarray]]:
+    """Yield (row_off, col_off, tile_height, tile_width, tile_world_x,
+    tile_world_y) for each tile covering the output raster, row-major.
+    Edge tiles are smaller than `tile_size` rather than padded."""
+    for row_off in range(0, height_px, tile_size):
+        tile_height = min(tile_size, height_px - row_off)
+        for col_off in range(0, width_px, tile_size):
+            tile_width = min(tile_size, width_px - col_off)
+
+            cols = col_off + np.arange(tile_width)
+            rows = row_off + np.arange(tile_height)
+            col_centers = transform.c + transform.a * (cols + 0.5)
+            row_centers = transform.f + transform.e * (rows + 0.5)
+            tile_world_x, tile_world_y = np.meshgrid(col_centers, row_centers)
+
+            yield row_off, col_off, tile_height, tile_width, tile_world_x, tile_world_y
 
 
 def _feather_weight(u: np.ndarray, v: np.ndarray, width: int, height: int, feather_fraction: float) -> np.ndarray:
@@ -266,14 +370,15 @@ def run_orthomosaic_generation(
     matching PINHOLE-model reconstruction) -- never the original distorted
     images, since sampling here does not itself correct for distortion.
 
-    Unlike the COLMAP-backed phases, the per-camera reprojection loop below
-    is this project's own code, so real, fine-grained progress is possible
-    (never fabricated): `progress_callback`, when given, is called with
-    `(cameras_done, cameras_total)` after each camera is processed.
-    `cancellation_token` (a `pycolmap.CancellationToken`, reused here purely
-    as a cheap thread-safe flag -- no pycolmap call is made in this loop)
-    is checked once per camera; if cancelled, raises `InterruptedError` to
-    match pycolmap's own convention for a cancelled operation.
+    Processed tile by tile (see module docstring) to bound peak memory
+    regardless of the output raster's total size. `progress_callback`,
+    when given, is called with `(tiles_done, tiles_total)` after each tile
+    is written -- real, fine-grained progress (never fabricated), just at
+    tile granularity rather than per-camera as before tiling existed.
+    `cancellation_token` (a `pycolmap.CancellationToken`, reused here
+    purely as a cheap thread-safe flag -- no pycolmap call is made in this
+    loop) is checked once per tile; if cancelled, raises
+    `InterruptedError` to match pycolmap's own convention.
     """
     config = config or OrthoConfig()
     reconstruction_path = Path(reconstruction_path)
@@ -292,7 +397,7 @@ def run_orthomosaic_generation(
     if not registered_ids:
         raise OrthoError("reconstruction has no registered images")
 
-    _, _, dem_elevation, dem_transform, crs_wkt = _load_dem_grid(dem_path)
+    dem_world_x, dem_world_y, dem_elevation, dem_transform, crs_wkt = _load_dem_grid(dem_path)
     dem_height_px, dem_width_px = dem_elevation.shape
 
     if config.resolution_m is not None:
@@ -312,70 +417,40 @@ def run_orthomosaic_generation(
             resolution_m = abs(dem_transform.a)
             resolution_source = "automatic (fallback: DEM resolution)"
 
-    world_x, world_y, elevation, transform = _build_output_grid(
-        dem_transform, dem_width_px, dem_height_px, dem_elevation, resolution_m
-    )
-    height_px, width_px = elevation.shape
+    width_px, height_px, transform = _output_geometry(dem_transform, dem_width_px, dem_height_px, resolution_m)
+    interpolator = _build_dem_interpolator(dem_transform, dem_width_px, dem_height_px, dem_elevation)
 
-    color_accum = np.zeros((height_px, width_px, 3), dtype=np.float64)
-    weight_accum = np.zeros((height_px, width_px), dtype=np.float64)
-
-    valid_terrain = ~np.isnan(elevation)
-    flat_x = world_x[valid_terrain]
-    flat_y = world_y[valid_terrain]
-    flat_z = elevation[valid_terrain]
-    flat_indices = np.argwhere(valid_terrain)  # (row, col) per flattened entry
-
-    world_points = np.stack([flat_x, flat_y, flat_z], axis=1)
-
-    num_cameras_used = 0
-    num_cameras_total = len(registered_ids)
-    for camera_index, image_id in enumerate(registered_ids, start=1):
-        if cancellation_token is not None and cancellation_token.is_cancelled:
-            raise InterruptedError("Operation cancelled")
-
+    # Precompute each registered camera's approximate ground footprint
+    # once, up front -- a cheap per-tile candidate pre-filter (see
+    # `_camera_footprint_bbox` docstring). Cameras with a missing image
+    # file or no DEM overlap at all are dropped here once, rather than
+    # being re-checked on every tile.
+    dem_cell_diag = float(np.hypot(abs(dem_transform.a), abs(dem_transform.e)))
+    cameras: list[dict] = []
+    for image_id in registered_ids:
         image = reconstruction.image(image_id)
         image_path = undistorted_image_path / image.name
         if not image_path.exists():
-            if progress_callback is not None:
-                progress_callback(camera_index, num_cameras_total)
             continue
-        camera = image.camera
-
-        cam_points = image.cam_from_world() * world_points
-        pixel_coords = camera.img_from_cam(cam_points, check_cheirality=True)
-        u = pixel_coords[:, 0]
-        v = pixel_coords[:, 1]
-        valid = (
-            ~np.isnan(u)
-            & (u >= 0)
-            & (u <= camera.width - 1)
-            & (v >= 0)
-            & (v <= camera.height - 1)
+        bbox = _camera_footprint_bbox(image, dem_world_x, dem_world_y, dem_elevation)
+        if bbox is None:
+            continue
+        cameras.append(
+            {
+                "image_id": image_id,
+                "image": image,
+                "camera": image.camera,
+                "image_path": image_path,
+                "bbox": bbox,
+                "cache": None,  # lazily holds the decoded (H, W, 3) uint8 array
+            }
         )
-        if not np.any(valid):
-            if progress_callback is not None:
-                progress_callback(camera_index, num_cameras_total)
-            continue
 
-        src_image = np.asarray(PILImage.open(image_path).convert("RGB"))
-        colors = _bilinear_sample(src_image, u, v, valid)
-        weights = np.zeros_like(u)
-        weights[valid] = _feather_weight(u[valid], v[valid], camera.width, camera.height, config.feather_fraction)
-
-        rows = flat_indices[valid, 0]
-        cols = flat_indices[valid, 1]
-        np.add.at(color_accum, (rows, cols), colors[valid] * weights[valid, None])
-        np.add.at(weight_accum, (rows, cols), weights[valid])
-        num_cameras_used += 1
-
-        if progress_callback is not None:
-            progress_callback(camera_index, num_cameras_total)
-
-    has_data = weight_accum > 0
-    rgb = np.zeros((height_px, width_px, 3), dtype=np.uint8)
-    rgb[has_data] = np.clip(color_accum[has_data] / weight_accum[has_data, None], 0, 255).astype(np.uint8)
-    alpha = np.where(has_data, 255, 0).astype(np.uint8)
+    tile_specs = list(_iter_tiles(width_px, height_px, transform, TILE_SIZE_PX))
+    num_tiles_total = len(tile_specs)
+    num_valid_pixels = 0
+    num_nodata_pixels = 0
+    used_camera_ids: set[int] = set()
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -392,9 +467,82 @@ def run_orthomosaic_generation(
         photometric="RGB",
         alpha="yes",
     ) as dst:
-        for band_index in range(3):
-            dst.write(rgb[:, :, band_index], band_index + 1)
-        dst.write(alpha, 4)
+        for tile_index, (row_off, col_off, tile_height, tile_width, tile_world_x, tile_world_y) in enumerate(
+            tile_specs, start=1
+        ):
+            if cancellation_token is not None and cancellation_token.is_cancelled:
+                raise InterruptedError("Operation cancelled")
+
+            tile_query = np.stack([tile_world_y.ravel(), tile_world_x.ravel()], axis=1)
+            tile_elevation = interpolator(tile_query).reshape(tile_world_y.shape)
+
+            color_accum = np.zeros((tile_height, tile_width, 3), dtype=np.float64)
+            weight_accum = np.zeros((tile_height, tile_width), dtype=np.float64)
+
+            valid_terrain = ~np.isnan(tile_elevation)
+            if np.any(valid_terrain):
+                flat_x = tile_world_x[valid_terrain]
+                flat_y = tile_world_y[valid_terrain]
+                flat_z = tile_elevation[valid_terrain]
+                flat_indices = np.argwhere(valid_terrain)
+                world_points = np.stack([flat_x, flat_y, flat_z], axis=1)
+
+                tile_bbox = (
+                    float(flat_x.min()),
+                    float(flat_x.max()),
+                    float(flat_y.min()),
+                    float(flat_y.max()),
+                )
+
+                for entry in cameras:
+                    if not _bbox_overlaps(entry["bbox"], tile_bbox, margin=dem_cell_diag):
+                        continue
+
+                    camera = entry["camera"]
+                    cam_points = entry["image"].cam_from_world() * world_points
+                    pixel_coords = camera.img_from_cam(cam_points, check_cheirality=True)
+                    u = pixel_coords[:, 0]
+                    v = pixel_coords[:, 1]
+                    valid = (
+                        ~np.isnan(u)
+                        & (u >= 0)
+                        & (u <= camera.width - 1)
+                        & (v >= 0)
+                        & (v <= camera.height - 1)
+                    )
+                    if not np.any(valid):
+                        continue
+
+                    if entry["cache"] is None:
+                        entry["cache"] = np.asarray(PILImage.open(entry["image_path"]).convert("RGB"))
+                    src_image = entry["cache"]
+
+                    colors = _bilinear_sample(src_image, u, v, valid)
+                    weights = np.zeros_like(u)
+                    weights[valid] = _feather_weight(
+                        u[valid], v[valid], camera.width, camera.height, config.feather_fraction
+                    )
+
+                    rows = flat_indices[valid, 0]
+                    cols = flat_indices[valid, 1]
+                    np.add.at(color_accum, (rows, cols), colors[valid] * weights[valid, None])
+                    np.add.at(weight_accum, (rows, cols), weights[valid])
+                    used_camera_ids.add(entry["image_id"])
+
+            has_data = weight_accum > 0
+            rgb = np.zeros((tile_height, tile_width, 3), dtype=np.uint8)
+            rgb[has_data] = np.clip(color_accum[has_data] / weight_accum[has_data, None], 0, 255).astype(np.uint8)
+            alpha = np.where(has_data, 255, 0).astype(np.uint8)
+            num_valid_pixels += int(has_data.sum())
+            num_nodata_pixels += int((~has_data).sum())
+
+            window = Window(col_off, row_off, tile_width, tile_height)
+            for band_index in range(3):
+                dst.write(rgb[:, :, band_index], band_index + 1, window=window)
+            dst.write(alpha, 4, window=window)
+
+            if progress_callback is not None:
+                progress_callback(tile_index, num_tiles_total)
 
     return OrthoResult(
         raster_path=str(output_path),
@@ -402,7 +550,7 @@ def run_orthomosaic_generation(
         height_px=height_px,
         resolution_m=abs(transform.a),
         resolution_source=resolution_source,
-        num_cameras_used=num_cameras_used,
-        num_valid_pixels=int(has_data.sum()),
-        num_nodata_pixels=int((~has_data).sum()),
+        num_cameras_used=len(used_camera_ids),
+        num_valid_pixels=num_valid_pixels,
+        num_nodata_pixels=num_nodata_pixels,
     )
