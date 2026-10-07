@@ -192,6 +192,13 @@ def run_dense_reconstruction(
         workspace_path=dense_workspace,
         input_type=input_type,
         options=fusion_options,
+        # Without this, pycolmap's binding defaults output_type to "bin" and
+        # tries to read the returned Reconstruction back from output_path as
+        # if it were a COLMAP binary reconstruction directory (cameras.bin/
+        # images.bin/points3D.bin), even though output_path is a .ply file --
+        # confirmed via `pycolmap-cuda12` 4.2.1 on real hardware: it raises
+        # `Check failed: colmap::ExistsDir(path_val)` on the .ply path itself.
+        output_type="PLY",
         cancellation_token=cancellation_token,
     )
 
