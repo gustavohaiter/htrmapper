@@ -783,6 +783,7 @@ class MainWindow(QMainWindow):
             point_cloud_native_path=result.point_cloud_native_path,
             undistorted_image_path=result.undistorted_image_path,
             undistorted_reconstruction_path=result.undistorted_reconstruction_path,
+            local_origin_m=result.local_origin_m,
         )
 
         QMessageBox.information(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -187,6 +188,73 @@ def test_patch_match_knobs_default_to_pycolmaps_own_defaults_when_unset(tmp_path
         )
 
     assert captured_undistort_kwargs["num_patch_match_src_images"] == -1
+
+
+def test_mvs_runs_in_a_local_frame_and_exports_absolute_coordinates(tmp_path: Path, monkeypatch):
+    """Regression test for the float32-precision root cause found on the
+    first real flight (ARCHITECTURE.md seção 25): COLMAP's MVS must never
+    see absolute UTM coordinates (the synthetic scene sits at northing
+    8.2e6, the same order as the real one, where float32 resolves only
+    0.5 m). This sandbox has no GPU, so patch-match is stubbed and fusion
+    is faked by handing back the undistorted *local* sparse model's own
+    points -- which lets us check the full round trip without a GPU: what
+    goes into undistortion is local, and what comes out (LAS, the model
+    Phase 6 consumes) is back in the project CRS, exactly."""
+    import laspy
+    import pycolmap
+
+    project, reconstruction_path = _aligned_project(tmp_path)
+    absolute = pycolmap.Reconstruction(str(reconstruction_path))
+    absolute_centers = {
+        absolute.image(i).name: np.array(absolute.image(i).projection_center()) for i in absolute.reg_image_ids()
+    }
+    absolute_points = np.array(sorted(tuple(p.xyz) for p in absolute.points3D.values()))
+    assert np.abs(absolute_points[:, 1]).min() > 1e6  # really in absolute UTM-like coordinates
+
+    monkeypatch.setattr(pycolmap, "has_cuda", True)
+    seen_input_centers = []
+    real_undistort_images = pycolmap.undistort_images
+
+    def _spy_undistort_images(*args, **kwargs):
+        model = pycolmap.Reconstruction(str(kwargs["input_path"]))
+        seen_input_centers.extend(np.array(model.image(i).projection_center()) for i in model.reg_image_ids())
+        return real_undistort_images(*args, **kwargs)
+
+    def _fake_fusion(*args, **kwargs):
+        return pycolmap.Reconstruction(str(Path(kwargs["workspace_path"]) / "sparse"))
+
+    monkeypatch.setattr(pycolmap, "undistort_images", _spy_undistort_images)
+    monkeypatch.setattr(pycolmap, "patch_match_stereo", lambda *a, **k: None)
+    monkeypatch.setattr(pycolmap, "stereo_fusion", _fake_fusion)
+
+    workdir = tmp_path / "work_dense"
+    result = run_dense_reconstruction(project, reconstruction_path, tmp_path / "images", workdir, MvsConfig())
+
+    # What COLMAP's MVS sees: small, local coordinates only.
+    assert seen_input_centers
+    assert max(np.abs(c[:2]).max() for c in seen_input_centers) < 1_000.0
+
+    # The origin is persisted, horizontal-only and near the cameras' centroid.
+    origin = np.array(result.local_origin_m)
+    assert origin[2] == 0.0
+    assert np.allclose(origin[:2], np.mean(list(absolute_centers.values()), axis=0)[:2], atol=1.0)
+    assert json.loads((workdir / "local_origin.json").read_text())["local_origin_m"] == result.local_origin_m
+
+    # The model Phase 6 consumes is back in the project CRS, exactly.
+    georef = pycolmap.Reconstruction(result.undistorted_reconstruction_path)
+    for image_id in georef.reg_image_ids():
+        image = georef.image(image_id)
+        assert np.allclose(np.array(image.projection_center()), absolute_centers[image.name], atol=1e-6)
+
+    # And so is the exported LAS. Matched by nearest neighbor, not by sort
+    # order: LAS quantizes to 0.1 mm, which can swap near-tied points.
+    from scipy.spatial import cKDTree
+
+    las = laspy.read(result.point_cloud_las_path)
+    las_points = np.column_stack([las.x, las.y, las.z])
+    assert las_points.shape == absolute_points.shape
+    distances, _ = cKDTree(absolute_points).query(las_points)
+    assert distances.max() < 1e-3
 
 
 def test_raises_with_clear_message_when_no_cuda(tmp_path: Path):

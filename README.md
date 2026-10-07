@@ -71,9 +71,11 @@ Implementado nesta fase:
   (RTX 3060 Ti via WSL2, 56 fotos reais, qualidade "alta": 90.246 pontos
   fundidos) — essa execução também achou e corrigiu um bug real na
   chamada do `pycolmap.stereo_fusion`, e expôs uma densidade de pontos
-  inesperadamente baixa (~0,87 pontos/m²) ainda sem causa confirmada — ver
-  `ARCHITECTURE.md` seções 15 e 24 (3 flags experimentais novas em
-  `htrmapper dense` para o usuário testar com GPU real).
+  inesperadamente baixa (~0,87 pontos/m²). Causa raiz provável: o MVS do
+  COLMAP trabalha em `float32`, que em coordenadas UTM absolutas (Y ≈ 7,5
+  milhões) só resolve passos de 0,5 m — agora a nuvem densa roda num
+  referencial local e a origem é somada de volta na exportação. Aguardando
+  validação num voo real; ver `ARCHITECTURE.md` seções 15, 24 e 25.
 - **Fase 5** (DEM/DSM a partir da nuvem densa, via GDAL/`rasterio` +
   `scipy.interpolate`): filtro de outliers robusto (mediana + MAD, não
   um corte de percentil fixo — um bug real pego pelo próprio teste, ver

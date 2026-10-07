@@ -1270,7 +1270,7 @@ documentado, sem precisar instalar CUDA Toolkit manualmente.
    caminhos que já estavam gravados dentro do `projeto.json` do Windows
    precisam, e isso o HTRMapper já faz sozinho).
 
-## 24. Nuvem densa esparsa no voo real (fazenda 20046) — investigação, ainda não resolvida
+## 24. Nuvem densa esparsa no voo real (fazenda 20046) — primeiras hipóteses (ver seção 25 para a causa raiz provável)
 
 A primeira nuvem densa real (seção 15/23: 56 fotos, RTX 3060 Ti, qualidade
 "alta") saiu com **densidade baixa** — ~90.246 pontos sobre uma área
@@ -1324,3 +1324,78 @@ quando especificados.
 resultante (`htrmapper dense` já reporta `num_points`) — e então decidir,
 com números reais, se vale mudar os valores padrão do projeto. Nunca
 assumir que um desses ajustes "resolve" sem essa validação.
+
+## 25. Causa raiz provável da nuvem densa esparsa: precisão `float32` com coordenadas UTM absolutas (corrigido, aguardando validação real)
+
+Revisão completa do pipeline em 2026-10-07, depois dos sintomas da seção
+17 (ortomosaico borrado, área cortada a oeste e "inventada" a leste).
+
+**O problema**: depois da Fase 2 (`sfm/pipeline.py`, `_georeference`) a
+reconstrução vive em coordenadas absolutas do CRS do projeto — no voo
+real, X ≈ 260.320 m e Y ≈ 7.548.601 m — e a Fase 4 entregava esse modelo
+direto ao MVS do COLMAP, que guarda poses de câmera e pontos fundidos em
+precisão simples (`float32`). Em Y ≈ 7,5 milhões, o menor passo
+representável em `float32` é **0,5 m** (em X ≈ 260 mil, 1,6 cm). Um erro de
+pose de ~0,5 m a ~100 m de altura desloca cada pixel em ~5 px, muito além
+dos limiares de 1–2 px do filtro de consistência geométrica do
+patch-match e da fusão.
+
+**Os sintomas reais batiam com isso, um por um** (nenhum deles explicado
+pelas hipóteses anteriores da seção 24):
+- No log da fusão em qualidade "alta", as 27 primeiras imagens somaram
+  ~600 pontos; ~90 mil pontos vieram só das imagens de índice 47–55 —
+  **só ~9 de 56 imagens geraram mapas de profundidade utilizáveis**.
+- "Média" (1600px) gerou **mais** pontos que "alta" (3200px): 158 mil
+  contra 90 mil. O normal é o contrário; com um erro métrico fixo, a
+  resolução menor transforma o mesmo erro em menos pixels.
+- A extensão do DEM/ortomosaico (= caixa dos pontos) ficou deslocada
+  ~90 m para leste em relação ao export do Pix4D do mesmo voo: começa ~70 m
+  mais a leste (o "bico" cortado a oeste) e vai ~117 m além (a área
+  "esticada" à direita, preenchida por extrapolação do DEM).
+
+Ressalva honesta: o uso de `float32` pelo MVS do COLMAP vem do
+conhecimento do código-fonte do COLMAP (classe de imagem do MVS e
+`PlyPoint` da fusão), não de um teste executado aqui — este ambiente não
+tem GPU. A correção abaixo é barata e correta de qualquer forma (é o que o
+ODM faz), mas a confirmação de que **era** a causa vem só da próxima
+execução real: se quase todas as 56 imagens passarem a contribuir pontos
+na fusão, era isso.
+
+**Correção** (`mvs/dense.py`): antes da desdistorção, o modelo é
+transladado por uma origem local (média das posições das câmeras,
+arredondada ao metro, só X/Y) e gravado em `workdir/sparse_local`; todo o
+MVS roda nesse referencial. A origem é somada de volta só nas fronteiras:
+- o LAS exportado (`_export_to_las(..., offset=...)`), em `float64`;
+- uma cópia georreferenciada do modelo desdistorcido
+  (`dense/sparse_georef`), que é o que a Fase 6 consome — a ida e volta é
+  exata, porque o modelo esparso é gravado em `float64`.
+
+O `fused.ply` nativo e o workspace denso ficam no referencial local; a
+origem fica registrada em `workdir/local_origin.json` e em
+`MvsSummary.local_origin_m` (zero para execuções anteriores a isso).
+
+**Validado aqui** (sem GPU): um teste roda a Fase 4 inteira sobre a cena
+sintética (que fica em Y ≈ 8,2 milhões, mesma ordem do voo real), com o
+patch-match substituído por nada e a fusão devolvendo os próprios pontos
+do modelo local. Ele confirma que o que entra no COLMAP está em
+coordenadas pequenas (< 1 km) e que o LAS e o modelo da Fase 6 voltam ao
+CRS do projeto com erro < 1 mm. Com a correção desligada, o mesmo teste
+falha (o COLMAP receberia coordenadas de 8,2 milhões).
+
+**Outros gaps encontrados na mesma revisão, ainda não corrigidos**
+(prioridade decrescente):
+1. Ortomosaico: a mistura entre fotos é uma média simples — o peso
+   `_feather_weight` só cai nos 10% da borda, então no miolo de cada foto
+   todas as fotos sobrepostas têm peso 1. Qualquer erro de altura no DEM
+   vira borrão. O padrão do Metashape ("Mosaic") escolhe a foto mais
+   vertical por região e mistura só nas emendas.
+2. Extensão do DEM/ortomosaico vem da caixa dos pontos densos (com
+   extrapolação por vizinho mais próximo dentro dela), não da área
+   realmente coberta pelas fotos.
+3. `RtkStdLon/Lat/Hgt` por imagem é lido no import mas ignorado no ajuste
+   GNSS (Fase 3 usa um sigma global); o resíduo GNSS de 71 cm do voo real
+   também merece investigação (ex.: atraso entre disparo e registro GNSS,
+   se o resíduo acompanhar a direção do voo).
+4. Altitude do EXIF usada sem distinção elipsoidal/ortométrica; SIRGAS
+   2000 tratado como igual a WGS84 (~0,5 m de diferença hoje pelo
+   movimento da placa).

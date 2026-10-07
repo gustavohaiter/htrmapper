@@ -217,6 +217,9 @@ class MvsSummary:
     point_cloud_native_path: str = ""
     undistorted_image_path: str = ""
     undistorted_reconstruction_path: str = ""
+    # Offset (project CRS) of the local frame the dense workspace and
+    # native fused.ply live in; zeros for runs made before it existed.
+    local_origin_m: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     ran_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
     def to_dict(self) -> dict:

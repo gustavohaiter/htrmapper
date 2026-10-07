@@ -17,13 +17,31 @@ whole -- the documented (not yet implemented) fallback for GPU-less
 machines is OpenMVS as an optional external process (already scoped that
 way in ARCHITECTURE.md section 2 due to its AGPL license), never a custom
 CPU MVS implementation.
+
+**Runs in a local frame, not in absolute project-CRS coordinates**
+(ARCHITECTURE.md section 25). After Phase 2/3 the sparse reconstruction
+lives in absolute UTM meters (northing ~7.5 million in the user's area).
+COLMAP's MVS keeps camera poses and fused points in single precision, and
+float32 at a northing of 7.5e6 can only represent steps of 0.5 m -- a pose
+error that, at ~100 m flying height, shifts every pixel by several pixels,
+far beyond patch-match's 1-2 px consistency thresholds. The real-flight
+symptoms matched exactly: only ~9 of 56 images contributed fused points,
+and the lower "media" tier produced *more* points than "alta" (the same
+metric error is fewer pixels at lower resolution). So the reconstruction
+is shifted by a rounded local origin (`_local_origin`) before
+undistortion, MVS runs entirely in that local frame, and the origin is
+added back only at the boundaries: the exported LAS, and a georeferenced
+copy of the undistorted model that Phase 6 consumes. The native `fused.ply`
+and the dense workspace stay in the local frame; the origin is persisted
+next to them (`local_origin.json`) and in `MvsResult.local_origin_m`.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import laspy
@@ -102,9 +120,36 @@ class MvsResult:
     point_cloud_native_path: str = ""
     undistorted_image_path: str = ""
     undistorted_reconstruction_path: str = ""
+    # Added to every local-frame coordinate to get back to the project CRS
+    # (see module docstring). The LAS and `undistorted_reconstruction_path`
+    # are already absolute; only `point_cloud_native_path` is local.
+    local_origin_m: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
 
 
-def _export_to_las(reconstruction: "pycolmap.Reconstruction", project_epsg: int, las_path: Path) -> None:
+def _local_origin(reconstruction: "pycolmap.Reconstruction") -> np.ndarray:
+    """Rounded mean of the registered camera centers, horizontal only.
+
+    Rounded to whole meters so the offset is human-readable in logs and in
+    `local_origin.json`; Z is left at 0 because elevations (~hundreds of
+    meters) are already well inside float32's precise range.
+    """
+    centers = np.array([reconstruction.image(i).projection_center() for i in reconstruction.reg_image_ids()])
+    origin = np.round(centers.mean(axis=0))
+    origin[2] = 0.0
+    return origin
+
+
+def _translated(reconstruction: "pycolmap.Reconstruction", translation: np.ndarray) -> "pycolmap.Reconstruction":
+    reconstruction.transform(pycolmap.Sim3d(1.0, pycolmap.Rotation3d(), np.asarray(translation, dtype=np.float64)))
+    return reconstruction
+
+
+def _export_to_las(
+    reconstruction: "pycolmap.Reconstruction",
+    project_epsg: int,
+    las_path: Path,
+    offset: np.ndarray | None = None,
+) -> None:
     xyz = []
     rgb = []
     for point in reconstruction.points3D.values():
@@ -115,6 +160,8 @@ def _export_to_las(reconstruction: "pycolmap.Reconstruction", project_epsg: int,
         raise MvsError("stereo fusion produced zero points; cannot export an empty point cloud")
 
     xyz_arr = np.array(xyz, dtype=np.float64)
+    if offset is not None:
+        xyz_arr += np.asarray(offset, dtype=np.float64)
     rgb_arr = np.array(rgb, dtype=np.uint8)
 
     header = laspy.LasHeader(point_format=7, version="1.4")
@@ -187,16 +234,37 @@ def run_dense_reconstruction(
     dense_workspace = workdir / "dense"
     dense_workspace.mkdir(parents=True, exist_ok=True)
 
+    reconstruction = pycolmap.Reconstruction(str(reconstruction_path))
+    if reconstruction.num_reg_images() == 0:
+        raise MvsError(f"reconstruction at {reconstruction_path} has no registered images")
+    local_origin = _local_origin(reconstruction)
+    local_sparse_path = workdir / "sparse_local"
+    local_sparse_path.mkdir(parents=True, exist_ok=True)
+    _translated(reconstruction, -local_origin).write(local_sparse_path)
+    (workdir / "local_origin.json").write_text(
+        json.dumps({"local_origin_m": local_origin.tolist(), "project_epsg": project.crs.effective_export_epsg}),
+        encoding="utf-8",
+    )
+    logger.info("dense reconstruction runs in a local frame; origin (project CRS) = %s", local_origin.tolist())
+
     _report("Desdistorcendo imagens")
     pycolmap.undistort_images(
         output_path=dense_workspace,
-        input_path=reconstruction_path,
+        input_path=local_sparse_path,
         image_path=image_root,
         num_patch_match_src_images=(
             config.num_patch_match_src_images if config.num_patch_match_src_images is not None else -1
         ),
         cancellation_token=cancellation_token,
     )
+
+    # Phase 6 samples the undistorted images through this model and looks
+    # terrain heights up in the (absolute) DEM, so it needs the undistorted
+    # cameras back in the project CRS. Written in double precision, so the
+    # round trip local -> absolute is exact.
+    georef_sparse_path = dense_workspace / "sparse_georef"
+    georef_sparse_path.mkdir(parents=True, exist_ok=True)
+    _translated(pycolmap.Reconstruction(str(dense_workspace / "sparse")), local_origin).write(georef_sparse_path)
 
     preset = _QUALITY_PRESETS[config.quality]
     options = pycolmap.PatchMatchOptions()
@@ -235,19 +303,18 @@ def run_dense_reconstruction(
 
     las_path = workdir / "dense_point_cloud.las"
     _report("Exportando nuvem de pontos (LAS)")
-    _export_to_las(dense_reconstruction, project.crs.effective_export_epsg, las_path)
+    _export_to_las(dense_reconstruction, project.crs.effective_export_epsg, las_path, offset=local_origin)
 
     return MvsResult(
         num_points=len(dense_reconstruction.points3D),
         quality=config.quality,
         point_cloud_las_path=str(las_path),
         point_cloud_native_path=str(fused_path),
-        # `undistort_images` writes the undistorted images and their
-        # matching PINHOLE-model reconstruction into these fixed
-        # subfolders of the workspace -- both are needed, unmodified, by
-        # Phase 6's orthorectification (it samples colors from these exact
-        # images and must use the exact reconstruction that matches them,
-        # never the original distorted images/sparse reconstruction).
+        # Phase 6 samples colors from exactly these undistorted images and
+        # must use the exact model that matches them (never the original
+        # distorted images/sparse model) -- the georeferenced copy, since
+        # the workspace's own `sparse` is in the local frame.
         undistorted_image_path=str(dense_workspace / "images"),
-        undistorted_reconstruction_path=str(dense_workspace / "sparse"),
+        undistorted_reconstruction_path=str(georef_sparse_path),
+        local_origin_m=local_origin.tolist(),
     )
