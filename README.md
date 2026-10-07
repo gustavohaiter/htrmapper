@@ -67,10 +67,10 @@ Implementado nesta fase:
   qualidade baixa/média/alta/muito_alta. CLI: `htrmapper dense`. GUI:
   botão "Nuvem densa…". **Importante:** patch-match stereo do COLMAP
   exige GPU CUDA/HIP — sem uma, falha rápido com mensagem clara (sem
-  fallback de CPU nativo). O ambiente onde este projeto foi desenvolvido
-  não tem GPU, então essa etapa em si (o cálculo dela) só foi validada
-  quanto ao caminho de erro — a validação numérica completa depende da
-  sua RTX 3060 Ti. Ver `ARCHITECTURE.md` seção 15.
+  fallback de CPU nativo). **Validado com hardware real em 2026-10-06/07**
+  (RTX 3060 Ti via WSL2, 56 fotos reais, qualidade "alta": 90.246 pontos
+  fundidos) — essa execução também achou e corrigiu um bug real na
+  chamada do `pycolmap.stereo_fusion`. Ver `ARCHITECTURE.md` seção 15.
 - **Fase 5** (DEM/DSM a partir da nuvem densa, via GDAL/`rasterio` +
   `scipy.interpolate`): filtro de outliers robusto (mediana + MAD, não
   um corte de percentil fixo — um bug real pego pelo próprio teste, ver
@@ -127,9 +127,11 @@ não funciona nativamente no Windows. O caminho recomendado: rodar Fases
 instalado lá — os caminhos do `projeto.json` são traduzidos
 automaticamente entre os dois lados (Windows ↔ `/mnt/c/...`), sem precisar
 editar nada à mão. Passo a passo completo e a lógica de detecção em
-`ARCHITECTURE.md` seção 23 — **setup ainda não validado em hardware real**
-(este ambiente de desenvolvimento não tem WSL2), precisa ser confirmado
-pelo usuário.
+`ARCHITECTURE.md` seção 23 — **validado em hardware real** (RTX 3060 Ti,
+2026-10-06/07); se a virtualização estiver desligada na BIOS (comum em
+PCs que nunca usaram máquina virtual), o Windows acusa
+`HCS_E_HYPERV_NOT_INSTALLED` ao instalar o WSL2 — a seção 23 documenta
+como resolver isso também.
 
 ## Uso — CLI
 

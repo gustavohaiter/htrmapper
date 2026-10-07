@@ -529,16 +529,44 @@ foi assumido sem reproduzir). Este módulo checa `pycolmap.has_cuda` antes
 de iniciar e falha rápido com uma mensagem clara, em vez de deixar esse
 erro nativo aparecer no meio de uma etapa longa.
 
-**O ambiente de desenvolvimento usado neste projeto não possui GPU.**
-Isso significa que a etapa de cálculo denso em si (patch-match stereo +
-fusão) **não pôde ser executada nem validada numericamente aqui** — só o
-caminho de erro (falta de GPU) e a exportação LAS (testados com uma
-nuvem de pontos construída manualmente, sem depender do cálculo denso em
-si) puderam ser validados de fato. O usuário tem uma RTX 3060 Ti (ver
-seção 17 do briefing original) — a validação completa desta fase, com
-números reais de reconstrução densa, só pode acontecer na máquina do
-usuário. Isso é dito aqui explicitamente para não alegar uma validação
-que não ocorreu (regra 3 do briefing).
+**O ambiente de desenvolvimento usado neste projeto não possui GPU** — a
+etapa de cálculo denso em si não pôde ser exercitada diretamente aqui.
+Isso foi dito explicitamente enquanto era verdade, para não alegar uma
+validação que não tinha ocorrido (regra 3 do briefing).
+
+**Atualização: validado com hardware real em 2026-10-06/07**, pelo
+usuário, numa RTX 3060 Ti via WSL2 (ver seção 23) — 56 fotos reais do
+DJI Mavic 3M, qualidade "alta" (`max_image_size=3200`): patch-match
+stereo levou 84 minutos, fusão ~1 minuto, resultado em 90.246 pontos
+fundidos exportados para LAS, DEM e ortomosaico gerados em seguida sem
+erro. Essa execução real também expôs um bug genuíno (não hipotético) no
+módulo (ver "Bug real encontrado..." logo abaixo) — corrigido e
+confirmado funcionando no mesmo hardware, via um script de recuperação
+que reaproveitou os depth maps já calculados em vez de refazer os 84
+minutos de GPU.
+
+O fallback de CPU para máquinas sem GPU continua não implementado — não
+é mais um requisito urgente agora que o caminho GPU via WSL2 está
+validado, mas segue reservado no desenho (OpenMVS externo, seção 2) caso
+surja necessidade de processar numa máquina sem GPU.
+
+### Bug real encontrado na primeira execução com GPU de verdade (corrigido)
+
+`pycolmap.stereo_fusion()` recebe um parâmetro `output_type` (padrão
+`"bin"`) que controla como o `Reconstruction` retornado é lido de volta
+depois da fusão. Sem especificar `output_type="PLY"` explicitamente, o
+binding do `pycolmap-cuda12` 4.2.1 tenta ler o `output_path` dado (um
+arquivo `.ply`) como se fosse um diretório de reconstrução binária do
+COLMAP (`cameras.bin`/`images.bin`/`points3D.bin`), e falha com
+`ValueError: Check failed: colmap::ExistsDir(path_val)` — mesmo com a
+fusão em si já tendo concluído com sucesso e o `fused.ply` já escrito
+corretamente em disco pelo núcleo em C++ antes do binding Python falhar
+no pós-processamento. Esse bug só podia ser encontrado rodando de
+verdade (nunca apareceria nos testes sintéticos, que não exercitam
+`stereo_fusion` por não terem GPU) — exatamente o tipo de achado que a
+regra "nunca confiar em validação não testada" deste projeto existe
+para capturar. Corrigido em `mvs/dense.py` passando `output_type="PLY"`
+explicitamente.
 
 O fallback de CPU para máquinas sem GPU permanece **não implementado**:
 a arquitetura já reserva o OpenMVS como processo externo opcional (seção
@@ -1051,11 +1079,17 @@ um recurso oficial e maduro da própria NVIDIA/Microsoft (drivers Windows
 já bastam, não se instala driver Linux dentro do WSL2), com desempenho
 próximo do nativo. Dentro do WSL2 (Ubuntu, por exemplo), `pip install
 pycolmap-cuda12` funcionaria de verdade com a GPU, para SIFT em GPU e para
-a nuvem densa da Fase 4. Isso não foi implementado nem testado por nós
-(depende do ambiente do próprio usuário), só documentado como o caminho
-correto -- nunca prometemos que funcionaria sem essa mudança de ambiente.
+a nuvem densa da Fase 4.
 
-## 23. Workflow Windows + WSL2 (implementado o essencial; setup real ainda não validado por nós)
+**Atualização: validado em 2026-10-06/07** pelo próprio usuário, numa
+RTX 3060 Ti via WSL2/Ubuntu 26.04 -- `pycolmap-cuda12` reconheceu a GPU
+(`has_cuda: True`) sem precisar instalar nenhum driver Linux nem CUDA
+Toolkit manualmente no sistema (o pacote já traz seu próprio runtime
+CUDA via pip, como `nvidia-cuda-runtime-cu12`); a Fase 4 completa (56
+fotos reais) rodou com sucesso -- ver seção 15 para os números e o bug
+real encontrado/corrigido nessa mesma execução.
+
+## 23. Workflow Windows + WSL2 (validado com hardware real em 2026-10-06/07)
 
 Decisão de arquitetura: em vez de o HTRMapper "chamar o WSL2 por dentro"
 (subprocess/RPC entre um processo Windows e um processo WSL2 -- complexo,
@@ -1092,13 +1126,26 @@ acharia as imagens nem a reconstrução salva antes.
 - Mensagem de erro da Fase 4 (`MvsError`, quando não há CUDA) atualizada
   para apontar esse caminho explicitamente, em vez de só dizer "sem GPU".
 
-### Setup do WSL2 (passo a passo para o usuário validar -- não testado por nós)
+### Setup do WSL2 (validado passo a passo pelo usuário em 2026-10-06)
 
 Nada disso pôde ser executado neste ambiente de desenvolvimento (é um
-container Linux comum, sem WSL2). Documentado como o caminho correto, a
-partir da documentação oficial NVIDIA/COLMAP -- precisa ser confirmado
-rodando de verdade na máquina do usuário, mesma regra de "nunca alegar
-validação que não ocorreu" que o projeto já segue para precisão numérica.
+container Linux comum, sem WSL2) -- documentado originalmente como o
+caminho correto a partir da documentação oficial NVIDIA/COLMAP, sem
+alegar validação que não tinha ocorrido. O usuário então seguiu esse
+roteiro na própria máquina (PC pessoal, Ryzen 7 5700G + RTX 3060 Ti,
+placa-mãe Gigabyte B550M Aorus Elite) e encontrou um obstáculo real não
+previsto aqui: a virtualização (SVM, equivalente AMD do VT-x) vinha
+desabilitada de fábrica na BIOS, causando
+`HCS_E_HYPERV_NOT_INSTALLED` ao instalar o WSL2 mesmo após habilitar o
+componente "Plataforma de Máquina Virtual" do Windows -- resolvido
+habilitando `SVM Mode` em
+`BIOS → Tweaker → Advanced CPU Settings → SVM Mode`. Esse é exatamente
+o tipo de obstáculo específico de hardware que uma documentação escrita
+sem testar de verdade não consegue prever -- vale como aviso para
+outros usuários com virtualização desabilitada na BIOS. Depois disso,
+o resto do roteiro (`wsl --install -d Ubuntu`, `pip install
+pycolmap-cuda12`, `has_cuda: True`) funcionou exatamente como
+documentado, sem precisar instalar CUDA Toolkit manualmente.
 
 1. No Windows (driver NVIDIA normal já instalado, nenhum driver Linux
    dentro do WSL2): `wsl --install -d Ubuntu` (PowerShell como
