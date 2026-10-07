@@ -64,6 +64,30 @@ _QUALITY_PRESETS: dict[str, dict] = {
 @dataclass
 class MvsConfig:
     quality: str = "media"
+    # All three below default to None ("use pycolmap's own default,
+    # unchanged") -- exposed, not changed, following a real but unresolved
+    # finding (ARCHITECTURE.md section 24): the one real execution of this
+    # module on real hardware so far (56-photo nadir UAV flight, RTX 3060
+    # Ti, 2026-10-06/07) produced an unusually sparse dense cloud (~1-3
+    # points/m^2, when MVS typically yields far more). Two plausible,
+    # low-risk levers for the user to experiment with on their own GPU
+    # (this sandbox has none to validate against):
+    #
+    # num_patch_match_src_images: how many candidate source images
+    # `undistort_images` picks per reference image for stereo matching.
+    # pycolmap's own default (-1) empirically resolved to 20 in development
+    # logs -- more candidates is strictly more data for the
+    # geometric-consistency filter to work with, never less.
+    #
+    # filter_min_triangulation_angle / filter_min_ncc: COLMAP's own FAQ
+    # explicitly warns that long-distance, nadir-only aerial imagery (our
+    # exact case, ~100m altitude) can have genuinely small but still valid
+    # triangulation angles -- the default filter (currently 3 degrees) may
+    # be discarding real terrain points, not just noise, on this kind of
+    # flight.
+    num_patch_match_src_images: int | None = None
+    filter_min_triangulation_angle: float | None = None
+    filter_min_ncc: float | None = None
 
     def __post_init__(self) -> None:
         if self.quality not in _QUALITY_PRESETS:
@@ -168,6 +192,9 @@ def run_dense_reconstruction(
         output_path=dense_workspace,
         input_path=reconstruction_path,
         image_path=image_root,
+        num_patch_match_src_images=(
+            config.num_patch_match_src_images if config.num_patch_match_src_images is not None else -1
+        ),
         cancellation_token=cancellation_token,
     )
 
@@ -177,6 +204,10 @@ def run_dense_reconstruction(
     options.window_radius = preset["window_radius"]
     options.num_samples = preset["num_samples"]
     options.geom_consistency = preset["geom_consistency"]
+    if config.filter_min_triangulation_angle is not None:
+        options.filter_min_triangulation_angle = config.filter_min_triangulation_angle
+    if config.filter_min_ncc is not None:
+        options.filter_min_ncc = config.filter_min_ncc
 
     _report("Patch-match stereo (GPU)")
     pycolmap.patch_match_stereo(

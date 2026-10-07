@@ -269,6 +269,7 @@ class OrthoSummary:
     width_px: int = 0
     height_px: int = 0
     resolution_m: float = 0.0
+    resolution_source: str = ""
     num_cameras_used: int = 0
     num_valid_pixels: int = 0
     num_nodata_pixels: int = 0

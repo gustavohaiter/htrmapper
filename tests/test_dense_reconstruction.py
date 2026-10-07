@@ -111,6 +111,84 @@ def test_undistorted_paths_point_at_the_real_images_and_sparse_subfolders(tmp_pa
     assert (dense_workspace / "sparse" / "cameras.bin").exists()
 
 
+def test_experimental_patch_match_knobs_are_passed_through_to_pycolmap(tmp_path: Path, monkeypatch):
+    """Regression test for the experimental sparse-cloud-density knobs
+    (ARCHITECTURE.md seção 24): `MvsConfig.num_patch_match_src_images` must
+    reach the real `pycolmap.undistort_images` call, and
+    `filter_min_triangulation_angle`/`filter_min_ncc` must reach the real
+    `PatchMatchOptions` object -- not just exist on the dataclass. Uses the
+    same monkeypatch-only-the-CUDA-check trick as
+    `test_undistorted_paths_point_at_the_real_images_and_sparse_subfolders`:
+    `undistort_images` runs for real (CPU-only), `patch_match_stereo` is
+    expected to fail fast afterwards since this sandbox has no GPU."""
+    import pycolmap
+
+    monkeypatch.setattr(pycolmap, "has_cuda", True)
+
+    captured_undistort_kwargs = {}
+    real_undistort_images = pycolmap.undistort_images
+
+    def _spy_undistort_images(*args, **kwargs):
+        captured_undistort_kwargs.update(kwargs)
+        return real_undistort_images(*args, **kwargs)
+
+    monkeypatch.setattr(pycolmap, "undistort_images", _spy_undistort_images)
+
+    captured_patch_match_options = {}
+    real_patch_match_stereo = pycolmap.patch_match_stereo
+
+    def _spy_patch_match_stereo(*args, **kwargs):
+        options = kwargs.get("options")
+        captured_patch_match_options["filter_min_triangulation_angle"] = options.filter_min_triangulation_angle
+        captured_patch_match_options["filter_min_ncc"] = options.filter_min_ncc
+        return real_patch_match_stereo(*args, **kwargs)
+
+    monkeypatch.setattr(pycolmap, "patch_match_stereo", _spy_patch_match_stereo)
+
+    project, reconstruction_path = _aligned_project(tmp_path)
+    config = MvsConfig(
+        quality="baixa",
+        num_patch_match_src_images=40,
+        filter_min_triangulation_angle=1.5,
+        filter_min_ncc=0.05,
+    )
+
+    with pytest.raises(ValueError, match="CUDA"):
+        run_dense_reconstruction(project, reconstruction_path, tmp_path / "images", tmp_path / "work", config)
+
+    assert captured_undistort_kwargs["num_patch_match_src_images"] == 40
+    assert captured_patch_match_options["filter_min_triangulation_angle"] == pytest.approx(1.5)
+    assert captured_patch_match_options["filter_min_ncc"] == pytest.approx(0.05)
+
+
+def test_patch_match_knobs_default_to_pycolmaps_own_defaults_when_unset(tmp_path: Path, monkeypatch):
+    """When the user doesn't set the experimental knobs, behavior must be
+    byte-for-byte identical to before they existed -- `num_patch_match_src_images`
+    passed as pycolmap's own -1 sentinel, and the filter options left
+    untouched on a fresh `PatchMatchOptions()`."""
+    import pycolmap
+
+    monkeypatch.setattr(pycolmap, "has_cuda", True)
+
+    captured_undistort_kwargs = {}
+    real_undistort_images = pycolmap.undistort_images
+
+    def _spy_undistort_images(*args, **kwargs):
+        captured_undistort_kwargs.update(kwargs)
+        return real_undistort_images(*args, **kwargs)
+
+    monkeypatch.setattr(pycolmap, "undistort_images", _spy_undistort_images)
+
+    project, reconstruction_path = _aligned_project(tmp_path)
+
+    with pytest.raises(ValueError, match="CUDA"):
+        run_dense_reconstruction(
+            project, reconstruction_path, tmp_path / "images", tmp_path / "work", MvsConfig(quality="baixa")
+        )
+
+    assert captured_undistort_kwargs["num_patch_match_src_images"] == -1
+
+
 def test_raises_with_clear_message_when_no_cuda(tmp_path: Path):
     """This sandbox genuinely has no CUDA/HIP GPU (confirmed via
     pycolmap.has_cuda during development) -- this test exercises the real

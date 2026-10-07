@@ -187,7 +187,12 @@ def _cmd_dense(args: argparse.Namespace) -> int:
     image_root = next(iter(image_parents))
 
     workdir = Path(args.workdir)
-    config = MvsConfig(quality=args.quality)
+    config = MvsConfig(
+        quality=args.quality,
+        num_patch_match_src_images=args.num_patch_match_src_images,
+        filter_min_triangulation_angle=args.filter_min_triangulation_angle,
+        filter_min_ncc=args.filter_min_ncc,
+    )
 
     print(f"Dense reconstruction for project: {project.name}")
     print(f"Reconstruction: {reconstruction_path}")
@@ -282,7 +287,7 @@ def _cmd_ortho(args: argparse.Namespace) -> int:
         print("error: project has no Fase 5 (DEM) result; run 'htrmapper dem' first", file=sys.stderr)
         return 1
 
-    config = OrthoConfig(feather_fraction=args.feather_fraction)
+    config = OrthoConfig(feather_fraction=args.feather_fraction, resolution_m=args.resolution)
 
     print(f"Orthomosaic generation for project: {project.name}")
     print(f"Reconstruction (undistorted): {project.mvs.undistorted_reconstruction_path}")
@@ -301,13 +306,14 @@ def _cmd_ortho(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    print(f"Size: {result.width_px} x {result.height_px} px ({result.resolution_m:.4f} m/px)")
+    print(f"Size: {result.width_px} x {result.height_px} px ({result.resolution_m:.4f} m/px, {result.resolution_source})")
     print(f"Cameras used: {result.num_cameras_used}")
     print(f"Valid pixels: {result.num_valid_pixels} ({result.num_nodata_pixels} nodata)")
     print(f"GeoTIFF: {result.raster_path}")
 
     project.ortho = OrthoSummary(
         raster_path=result.raster_path,
+        resolution_source=result.resolution_source,
         width_px=result.width_px,
         height_px=result.height_px,
         resolution_m=result.resolution_m,
@@ -397,6 +403,38 @@ def build_parser() -> argparse.ArgumentParser:
     dense_parser.add_argument(
         "--quality", choices=["baixa", "media", "alta", "muito_alta"], default="media", help="Dense quality tier"
     )
+    dense_parser.add_argument(
+        "--num-patch-match-src-images",
+        type=int,
+        default=None,
+        help=(
+            "Number of candidate source images per reference image for stereo matching "
+            "(default: pycolmap's own default, -1/20). Experimental knob for sparse-cloud "
+            "investigation on nadir UAV flights -- see ARCHITECTURE.md seção 24; a higher value "
+            "is strictly more data for the consistency filter, at higher compute cost"
+        ),
+    )
+    dense_parser.add_argument(
+        "--filter-min-triangulation-angle",
+        type=float,
+        default=None,
+        help=(
+            "Minimum triangulation angle (degrees) a point must have to survive patch-match "
+            "filtering (default: pycolmap's own default, currently 3.0). COLMAP's own FAQ warns "
+            "this can be too strict for long-distance, nadir-only aerial imagery -- experimental, "
+            "see ARCHITECTURE.md seção 24"
+        ),
+    )
+    dense_parser.add_argument(
+        "--filter-min-ncc",
+        type=float,
+        default=None,
+        help=(
+            "Minimum normalized cross-correlation a point must have to survive patch-match "
+            "filtering (default: pycolmap's own default, currently 0.1). Experimental, see "
+            "ARCHITECTURE.md seção 24"
+        ),
+    )
     dense_parser.set_defaults(func=_cmd_dense)
 
     dem_parser = subparsers.add_parser(
@@ -422,6 +460,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.1,
         help="Edge-feathering width as a fraction of image size, in (0, 0.5] (default: 0.1)",
+    )
+    ortho_parser.add_argument(
+        "--resolution",
+        type=float,
+        default=None,
+        help=(
+            "Orthomosaic resolution in meters/pixel (default: automatic, estimated from each "
+            "camera's real height above the DEM terrain and its focal length -- independent of "
+            "the DEM's own resolution, which may be much coarser)"
+        ),
     )
     ortho_parser.set_defaults(func=_cmd_ortho)
 

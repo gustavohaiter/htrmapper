@@ -70,7 +70,10 @@ Implementado nesta fase:
   fallback de CPU nativo). **Validado com hardware real em 2026-10-06/07**
   (RTX 3060 Ti via WSL2, 56 fotos reais, qualidade "alta": 90.246 pontos
   fundidos) — essa execução também achou e corrigiu um bug real na
-  chamada do `pycolmap.stereo_fusion`. Ver `ARCHITECTURE.md` seção 15.
+  chamada do `pycolmap.stereo_fusion`, e expôs uma densidade de pontos
+  inesperadamente baixa (~0,87 pontos/m²) ainda sem causa confirmada — ver
+  `ARCHITECTURE.md` seções 15 e 24 (3 flags experimentais novas em
+  `htrmapper dense` para o usuário testar com GPU real).
 - **Fase 5** (DEM/DSM a partir da nuvem densa, via GDAL/`rasterio` +
   `scipy.interpolate`): filtro de outliers robusto (mediana + MAD, não
   um corte de percentil fixo — um bug real pego pelo próprio teste, ver
@@ -90,9 +93,14 @@ Implementado nesta fase:
   terreno). Validado contra cores de terreno conhecidas de uma cena
   sintética com posições de câmera exatas (erro médio de cor < 8/255) —
   processo que expôs e corrigiu um bug real de convenção norte-sul na
-  fixture de teste compartilhada, sem afetar as fases anteriores. CLI:
-  `htrmapper ortho`. GUI: botão "Gerar Ortomosaico…". Ver
-  `ARCHITECTURE.md` seção 17.
+  fixture de teste compartilhada, sem afetar as fases anteriores.
+  **Resolução sempre independente da resolução do DEM** (bug real
+  corrigido em 2026-10-07, encontrado num voo real onde o ortomosaico
+  saiu ~100x mais grosseiro que a resolução nativa das fotos): por padrão
+  é estimada a partir da altura real de cada câmera acima do terreno e da
+  distância focal calibrada, nunca reaproveitando a grade do DEM
+  diretamente. CLI: `htrmapper ortho [--resolution N]`. GUI: botão "Gerar
+  Ortomosaico…". Ver `ARCHITECTURE.md` seção 17.
 - **Fase 7** (interface completa): árvore de projeto (Projeto / Imagens /
   Câmeras / Tie Points / Point Cloud / DEM / Orthomosaic). Cada etapa de
   longa duração (Alinhar, Ajustar, Nuvem densa, DEM, Ortomosaico) roda em

@@ -745,8 +745,61 @@ ou DEM de entrada não existem.
 - `core.report`: quando `project.ortho` existe, preenche a seção
   "Orthomosaic" (tamanho, sistema de coordenadas) e o campo Orthomosaic
   dos Processing Parameters.
-- CLI: `htrmapper ortho <projeto.json> --output <ortho.tif> [--feather-fraction N]`
+- CLI: `htrmapper ortho <projeto.json> --output <ortho.tif> [--feather-fraction N] [--resolution N]`
   (requer Fase 4 e Fase 5 já executadas). GUI: botão "Gerar Ortomosaico…".
+
+### Bug real encontrado com dados reais em 2026-10-07: resolução do ortomosaico acoplada à do DEM
+
+A primeira execução de ponta a ponta com fotos reais (fazenda 20046, 56
+fotos DJI Mavic 3M) produziu um ortomosaico **visivelmente ruim**
+("blocado"/pixelado) — o usuário comparou com a experiência diária dele
+em Pix4D/Metashape e corretamente desconfiou do resultado antes de aceitar
+qualquer coisa como "deu certo". Investigação confirmou: o ortomosaico
+saiu em **2,46 m/pixel**, quando a resolução nativa das fotos nesse voo
+(~100m AGL) é de **~2,7 cm/pixel** — quase 100x mais grosseiro. Comparação
+direta com metadados de um export real do Pix4Dfields do mesmo voo
+confirmou o alvo correto (0,0248 m/pixel, 13756x12215px) e também revelou
+que a área realmente fotografada no solo (~341m x ~303m) é bem maior que
+a extensão apenas das *posições das câmeras* (~201m x ~161m, o número que
+o relatório de importação mostra) — a pegada de cada foto no solo se
+estende bem além de onde o drone passou.
+
+**Causa raiz**: `run_orthomosaic_generation` carregava a grade de saída
+**diretamente do raster do DEM** (`_load_dem_grid`), pixel a pixel —
+então qualquer resolução que o DEM tivesse (automática, derivada da
+densidade da nuvem de pontos — baixa nesse voo, ver seção 24 abaixo) virava,
+sem nenhum desacoplamento, a resolução do ortomosaico também. Isso é uma
+diferença de desenho real em relação a ferramentas maduras: no
+Pix4D/Metashape, o DEM/malha é usado **só** como consulta de altura de
+terreno na hora de orto-retificar; a resolução do ortomosaico em si é
+escolhida de forma independente, perto da resolução nativa das fotos.
+
+**Correção**: `run_orthomosaic_generation` agora constrói sua **própria**
+grade de saída (mesma extensão/footprint do DEM, resolução independente)
+e reamostra a superfície de elevação do DEM sobre essa grade nova via
+interpolação bilinear (`scipy.interpolate.RegularGridInterpolator` — nunca
+reamostragem própria). A resolução automática (quando não especificada) é
+estimada diretamente da altura real de cada câmera registrada acima do
+terreno do DEM e da distância focal calibrada em pixels
+(`Camera.mean_focal_length()`) — a mesma fórmula pinhole de `geo.gsd`, mas
+usando geometria reconstruída de verdade em vez da altitude nominal do
+EXIF, que é mais precisa (exatamente a recomputação "pós-alinhamento,
+mais precisa" que o próprio docstring de `geo/gsd.py` já antecipava desde
+a Fase 1, nunca implementada até agora). Validado: teste de regressão
+confirma que a resolução automática do ortomosaico não muda quando o DEM
+de entrada é 10x mais grosseiro; outro teste confirma que a resolução
+automática bate com o GSD conhecido da cena sintética (tolerância 10%).
+
+`OrthoConfig` ganhou `resolution_m: float | None = None` (mesmo padrão do
+`DemConfig`); `OrthoResult`/`OrthoSummary` ganharam `resolution_source`
+("automatic (camera GSD)" / "user-defined" / fallback para a resolução do
+DEM no caso degenerado de nenhuma câmera ter amostra de terreno válida).
+CLI: nova flag `--resolution`. GUI: novo diálogo de resolução no botão
+"Gerar Ortomosaico…", espelhando o que já existia para o DEM.
+
+**Ver seção 24** para a investigação de por que a nuvem densa desse voo
+real saiu com densidade baixa (~1-3 pontos/m², quando MVS tipicamente
+entrega dezenas a centenas).
 
 ## 18. Fase 7 — interface completa (implementada e validada)
 
@@ -1167,3 +1220,58 @@ documentado, sem precisar instalar CUDA Toolkit manualmente.
    argumentos digitados pelo usuário, não precisam de tradução (só os
    caminhos que já estavam gravados dentro do `projeto.json` do Windows
    precisam, e isso o HTRMapper já faz sozinho).
+
+## 24. Nuvem densa esparsa no voo real (fazenda 20046) — investigação, ainda não resolvida
+
+A primeira nuvem densa real (seção 15/23: 56 fotos, RTX 3060 Ti, qualidade
+"alta") saiu com **densidade baixa** — ~90.246 pontos sobre uma área
+fotografada real de ~103.343 m² (ver seção 17 para como essa área real foi
+descoberta, comparando com um export do Pix4Dfields do mesmo voo), ou
+seja, **~0,87 pontos/m²**. MVS tipicamente entrega dezenas a centenas de
+pontos/m² em imagens aéreas de boa sobreposição — essa diferença de
+1-2 ordens de grandeza é real, não um artefato de cálculo, e foi o que
+produziu o DEM "borrado"/sem relevo reconhecível que o usuário viu.
+
+**Duas causas candidatas, pesquisadas mas não validadas** (este ambiente
+de desenvolvimento não tem GPU para testar de verdade):
+
+1. **`num_patch_match_src_images`** (parâmetro do próprio
+   `pycolmap.undistort_images`, nunca antes configurado por este
+   código): controla quantas imagens-candidatas cada imagem de referência
+   usa no patch-match stereo. O valor padrão do pycolmap (`-1`) resolveu,
+   empiricamente, em exatamente **20** candidatas nos logs reais da
+   execução de 2026-10-06 (`src_image_idxs` com 20 entradas). Mais
+   candidatas é estritamente mais dado disponível para o filtro de
+   consistência geométrica decidir se um ponto é confiável — nunca menos.
+
+2. **`filter_min_triangulation_angle`** (padrão do COLMAP: 3 graus) e
+   **`filter_min_ncc`** (padrão: 0,1), ambos parâmetros de
+   `PatchMatchOptions`: a própria documentação FAQ do COLMAP recomenda
+   reduzir o ângulo mínimo de triangulação quando as imagens são
+   capturadas de longe em relação à cena — exatamente o caso de um voo
+   nadir a ~100m de altura, onde ângulos de triangulação genuinamente
+   pequenos (mas ainda válidos) são uma característica estrutural da
+   imagem aérea top-down, não necessariamente ruído. É plausível que o
+   filtro padrão esteja descartando pontos de terreno reais, não só
+   blunders.
+
+**O que foi feito agora** (sem mudar nenhum comportamento padrão, já que
+nenhuma das duas hipóteses pôde ser validada sem GPU real): os três
+parâmetros foram expostos como campos opcionais em `MvsConfig`
+(`num_patch_match_src_images`, `filter_min_triangulation_angle`,
+`filter_min_ncc`), todos com padrão `None` ("usa o padrão do próprio
+pycolmap, comportamento inalterado"), e novas flags de CLI
+(`--num-patch-match-src-images`, `--filter-min-triangulation-angle`,
+`--filter-min-ncc`) em `htrmapper dense`. Um teste de regressão confirma
+que, sem especificar nada, o comportamento é idêntico a antes (passa `-1`
+para `num_patch_match_src_images`, não toca nos filtros); outro confirma
+que os três valores realmente chegam até as chamadas reais do pycolmap
+quando especificados.
+
+**Próximo passo real** (precisa do usuário, com GPU): rodar o mesmo voo
+(fazenda 20046) algumas vezes variando esses parâmetros (ex.:
+`--num-patch-match-src-images 40`, depois
+`--filter-min-triangulation-angle 1.5`) e comparar a densidade de pontos
+resultante (`htrmapper dense` já reporta `num_points`) — e então decidir,
+com números reais, se vale mudar os valores padrão do projeto. Nunca
+assumir que um desses ajustes "resolve" sem essa validação.

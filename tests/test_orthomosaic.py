@@ -144,3 +144,59 @@ def test_raises_when_dem_missing(tmp_path: Path):
 
     with pytest.raises(OrthoError, match="DEM not found"):
         run_orthomosaic_generation(reconstruction_path, images_dir, tmp_path / "no_dem.tif", tmp_path / "out.tif")
+
+
+def test_ortho_config_rejects_non_positive_resolution():
+    with pytest.raises(ValueError):
+        OrthoConfig(resolution_m=0.0)
+    with pytest.raises(ValueError):
+        OrthoConfig(resolution_m=-1.0)
+
+
+def test_automatic_resolution_is_independent_of_a_much_coarser_dem(tmp_path: Path):
+    # Regression test for a real bug (found 2026-10-07 on a real 56-photo
+    # flight): the orthomosaic used to simply reuse the DEM's own raster
+    # grid, so a coarse DEM (e.g. from a sparse dense cloud, or a
+    # deliberately low DEM quality tier) silently forced the orthomosaic
+    # coarse too. A DEM resolution 10x coarser than the camera's real GSD
+    # must not change the orthomosaic's automatic resolution at all.
+    spec, terrain, images_dir, reconstruction_path, dem_path = _setup_ground_truth_scene(tmp_path)
+
+    coarse_dem_path = tmp_path / "dem_coarse.tif"
+    positions = _camera_grid_positions(spec)
+    _build_flat_dem(spec, positions, coarse_dem_path, resolution_m=spec.gsd_m_per_px * 10)
+
+    fine_result = run_orthomosaic_generation(reconstruction_path, images_dir, dem_path, tmp_path / "ortho_fine_dem.tif")
+    coarse_result = run_orthomosaic_generation(
+        reconstruction_path, images_dir, coarse_dem_path, tmp_path / "ortho_coarse_dem.tif"
+    )
+
+    assert fine_result.resolution_source == "automatic (camera GSD)"
+    assert coarse_result.resolution_source == "automatic (camera GSD)"
+    # Same automatic resolution regardless of the DEM's own resolution --
+    # the whole point of the fix.
+    assert coarse_result.resolution_m == pytest.approx(fine_result.resolution_m, rel=0.05)
+
+
+def test_automatic_resolution_matches_known_camera_gsd(tmp_path: Path):
+    spec, terrain, images_dir, reconstruction_path, dem_path = _setup_ground_truth_scene(tmp_path)
+
+    result = run_orthomosaic_generation(reconstruction_path, images_dir, dem_path, tmp_path / "ortho.tif")
+
+    assert result.resolution_source == "automatic (camera GSD)"
+    # Estimated from real (bundle-adjusted-equivalent, here ground-truth)
+    # camera height above DEM terrain and calibrated focal length -- should
+    # land close to the synthetic flight's known, designed-in GSD.
+    assert result.resolution_m == pytest.approx(spec.gsd_m_per_px, rel=0.1)
+
+
+def test_explicit_resolution_overrides_automatic_estimate(tmp_path: Path):
+    spec, terrain, images_dir, reconstruction_path, dem_path = _setup_ground_truth_scene(tmp_path)
+
+    forced_resolution = spec.gsd_m_per_px * 3
+    result = run_orthomosaic_generation(
+        reconstruction_path, images_dir, dem_path, tmp_path / "ortho.tif", OrthoConfig(resolution_m=forced_resolution)
+    )
+
+    assert result.resolution_source == "user-defined"
+    assert result.resolution_m == pytest.approx(forced_resolution)

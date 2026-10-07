@@ -864,6 +864,22 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Ortomosaico", "Gere o DEM primeiro.")
             return
 
+        resolution_str, ok = QInputDialog.getText(
+            self,
+            "Resolução do ortomosaico",
+            "Resolução em m/pixel (deixe em branco para automático, estimado a partir da altura "
+            "real de cada câmera acima do terreno -- independente da resolução do DEM):",
+        )
+        if not ok:
+            return
+        resolution_m = None
+        if resolution_str.strip():
+            try:
+                resolution_m = float(resolution_str.strip())
+            except ValueError:
+                QMessageBox.warning(self, "Ortomosaico", f"Resolução inválida: {resolution_str!r}")
+                return
+
         output_path, _ = QFileDialog.getSaveFileName(
             self, "Salvar ortomosaico", f"{self.project.name}_ortho.tif", "GeoTIFF (*.tif)"
         )
@@ -876,7 +892,7 @@ class MainWindow(QMainWindow):
             Path(self.project.mvs.undistorted_image_path),
             Path(self.project.dem.raster_path),
             Path(output_path),
-            OrthoConfig(),
+            OrthoConfig(resolution_m=resolution_m),
         )
         self._start_worker(worker, "Ortomosaico", self._handle_ortho_result)
 
@@ -886,6 +902,7 @@ class MainWindow(QMainWindow):
             width_px=result.width_px,
             height_px=result.height_px,
             resolution_m=result.resolution_m,
+            resolution_source=result.resolution_source,
             num_cameras_used=result.num_cameras_used,
             num_valid_pixels=result.num_valid_pixels,
             num_nodata_pixels=result.num_nodata_pixels,
@@ -894,7 +911,8 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Ortomosaico gerado",
-            f"{result.width_px}x{result.height_px}px, resolução {result.resolution_m:.3f} m/px.\n"
+            f"{result.width_px}x{result.height_px}px, resolução {result.resolution_m:.3f} m/px "
+            f"({result.resolution_source}).\n"
             f"Câmeras usadas: {result.num_cameras_used}.\nGeoTIFF: {result.raster_path}",
         )
         self.status_label.setText(f"{len(self.project.images)} imagem(ns) carregada(s). Ortomosaico gerado.")
