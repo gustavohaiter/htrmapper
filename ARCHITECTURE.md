@@ -1325,7 +1325,7 @@ resultante (`htrmapper dense` já reporta `num_points`) — e então decidir,
 com números reais, se vale mudar os valores padrão do projeto. Nunca
 assumir que um desses ajustes "resolve" sem essa validação.
 
-## 25. Causa raiz provável da nuvem densa esparsa: precisão `float32` com coordenadas UTM absolutas (corrigido, aguardando validação real)
+## 25. Causa raiz da nuvem densa esparsa: precisão `float32` com coordenadas UTM absolutas (corrigido e confirmado em voo real)
 
 Revisão completa do pipeline em 2026-10-07, depois dos sintomas da seção
 17 (ortomosaico borrado, área cortada a oeste e "inventada" a leste).
@@ -1381,6 +1381,15 @@ do modelo local. Ele confirma que o que entra no COLMAP está em
 coordenadas pequenas (< 1 km) e que o LAS e o modelo da Fase 6 voltam ao
 CRS do projeto com erro < 1 mm. Com a correção desligada, o mesmo teste
 falha (o COLMAP receberia coordenadas de 8,2 milhões).
+
+**Confirmado em hardware real (2026-10-08)**: mesmo voo (fazenda 20046,
+56 fotos), mesma qualidade "media", RTX 3060 Ti, código com a correção:
+**2.580.544 pontos** fundidos em 32m31s — contra 158.330 pontos (30m37s)
+antes da correção, e 174.897 num teste de controle sem a correção mas com
+`--num-patch-match-src-images 40`. Ou seja, ~16x mais pontos pelo mesmo
+custo, enquanto o aumento de imagens-candidatas (a hipótese da seção 24)
+rendeu só ~10%. Isso confirma a precisão `float32` como causa raiz da
+nuvem esparsa.
 
 **Outros gaps encontrados na mesma revisão, ainda não corrigidos**
 (prioridade decrescente):

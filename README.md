@@ -74,8 +74,9 @@ Implementado nesta fase:
   inesperadamente baixa (~0,87 pontos/m²). Causa raiz provável: o MVS do
   COLMAP trabalha em `float32`, que em coordenadas UTM absolutas (Y ≈ 7,5
   milhões) só resolve passos de 0,5 m — agora a nuvem densa roda num
-  referencial local e a origem é somada de volta na exportação. Aguardando
-  validação num voo real; ver `ARCHITECTURE.md` seções 15, 24 e 25.
+  referencial local e a origem é somada de volta na exportação.
+  Confirmado no mesmo voo real: 2,58 milhões de pontos contra 158 mil,
+  no mesmo tempo; ver `ARCHITECTURE.md` seções 15, 24 e 25.
 - **Fase 5** (DEM/DSM a partir da nuvem densa, via GDAL/`rasterio` +
   `scipy.interpolate`): filtro de outliers robusto (mediana + MAD, não
   um corte de percentil fixo — um bug real pego pelo próprio teste, ver
