@@ -14,7 +14,12 @@ from htrmapper.geo.crs import CoordinateReferenceSystem
 from htrmapper.gnss.accuracy import CameraAccuracy
 from htrmapper.io.image_import import import_folder
 from htrmapper.mvs.dense import MvsConfig, MvsError, run_dense_reconstruction
-from htrmapper.ortho.orthomosaic import OrthoConfig, OrthoError, run_orthomosaic_generation
+from htrmapper.ortho.orthomosaic import (
+    DEFAULT_MAX_VIEW_ANGLE_DEG,
+    OrthoConfig,
+    OrthoError,
+    run_orthomosaic_generation,
+)
 from htrmapper.sfm.pipeline import SfmConfig, SfmError, run_structure_from_motion
 
 
@@ -288,7 +293,7 @@ def _cmd_ortho(args: argparse.Namespace) -> int:
         print("error: project has no Fase 5 (DEM) result; run 'htrmapper dem' first", file=sys.stderr)
         return 1
 
-    config = OrthoConfig(feather_fraction=args.feather_fraction, resolution_m=args.resolution)
+    config = OrthoConfig(resolution_m=args.resolution, max_view_angle_deg=args.max_view_angle)
 
     print(f"Orthomosaic generation for project: {project.name}")
     print(f"Reconstruction (undistorted): {project.mvs.undistorted_reconstruction_path}")
@@ -455,12 +460,18 @@ def build_parser() -> argparse.ArgumentParser:
         "ortho", help="Fase 6: geração de ortomosaico ('htrmapper dense' e 'htrmapper dem' primeiro)"
     )
     ortho_parser.add_argument("project", help="Path to a project .json file with Fase 4 (dense) and Fase 5 (DEM) results")
-    ortho_parser.add_argument("--output", required=True, help="Path for the output RGBA GeoTIFF")
     ortho_parser.add_argument(
-        "--feather-fraction",
+        "--output", required=True, help="Path for the output GeoTIFF (RGB, JPEG, internal mask and overviews)"
+    )
+    ortho_parser.add_argument(
+        "--max-view-angle",
         type=float,
-        default=0.1,
-        help="Edge-feathering width as a fraction of image size, in (0, 0.5] (default: 0.1)",
+        default=DEFAULT_MAX_VIEW_ANGLE_DEG,
+        help=(
+            "Leave empty every pixel whose most-vertical view is more oblique than this many degrees "
+            f"(default: {DEFAULT_MAX_VIEW_ANGLE_DEG:g}). Crops the smeared fringe seen only at the edge "
+            "of the outermost photos; raise it (up to 89) to keep more of the border"
+        ),
     )
     ortho_parser.add_argument(
         "--resolution",

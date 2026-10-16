@@ -678,7 +678,8 @@ arquitetura de construir sobre bibliotecas maduras.
      3D válidos do terreno (`cam_from_world()` seguido de `img_from_cam(...,
      check_cheirality=True)`), filtra por NaN (pontos atrás da câmera) e
      por limites da imagem, e amostra a cor por interpolação bilinear.
-  3. **Blending por distância-à-borda ("feathering")**: cada câmera
+  3. **Blending por distância-à-borda ("feathering")** — substituído na
+     seção 26 pela escolha da foto mais vertical por pixel: cada câmera
      contribui um voto ponderado por pixel de saída, com peso decrescendo
      linearmente perto da borda da imagem-fonte — assim a costura entre
      duas imagens sobrepostas suaviza em vez de mostrar uma borda dura.
@@ -745,7 +746,8 @@ ou DEM de entrada não existem.
 - `core.report`: quando `project.ortho` existe, preenche a seção
   "Orthomosaic" (tamanho, sistema de coordenadas) e o campo Orthomosaic
   dos Processing Parameters.
-- CLI: `htrmapper ortho <projeto.json> --output <ortho.tif> [--feather-fraction N] [--resolution N]`
+- CLI: `htrmapper ortho <projeto.json> --output <ortho.tif> [--resolution N] [--max-view-angle G]`
+  (`--feather-fraction` existiu até a seção 26, que trocou a mistura por média)
   (requer Fase 4 e Fase 5 já executadas). GUI: botão "Gerar Ortomosaico…".
 
 ### Bug real encontrado com dados reais em 2026-10-07: resolução do ortomosaico acoplada à do DEM
@@ -1391,8 +1393,8 @@ custo, enquanto o aumento de imagens-candidatas (a hipótese da seção 24)
 rendeu só ~10%. Isso confirma a precisão `float32` como causa raiz da
 nuvem esparsa.
 
-**Outros gaps encontrados na mesma revisão, ainda não corrigidos**
-(prioridade decrescente):
+**Outros gaps encontrados na mesma revisão** (prioridade decrescente;
+1 e 2 resolvidos na seção 26):
 1. Ortomosaico: a mistura entre fotos é uma média simples — o peso
    `_feather_weight` só cai nos 10% da borda, então no miolo de cada foto
    todas as fotos sobrepostas têm peso 1. Qualquer erro de altura no DEM
@@ -1408,3 +1410,66 @@ nuvem esparsa.
 4. Altitude do EXIF usada sem distinção elipsoidal/ortométrica; SIRGAS
    2000 tratado como igual a WGS84 (~0,5 m de diferença hoje pelo
    movimento da placa).
+
+## 26. Ortomosaico: foto mais vertical por pixel, corte da borda oblíqua e formato otimizado
+
+Depois da correção da seção 25, o mesmo voo (fazenda 20046) passou a
+cobrir o talhão inteiro, na posição certa em relação ao export do Pix4D.
+Na comparação lado a lado ainda havia três diferenças, todas corrigidas
+aqui a pedido do usuário:
+
+**1. Mistura por média → foto mais vertical por pixel.** O peso antigo
+(`_feather_weight`) só caía nos 10% da borda de cada foto; no miolo todas
+as fotos sobrepostas tinham peso 1, então cada pixel era a média simples
+de 5–15 vistas. Qualquer erro de altura do DEM (copa da cana, árvores)
+desloca o pixel numa direção diferente em cada vista, e a média vira
+borrão. Agora cada pixel vem da câmera que o vê mais perto da vertical
+(menor ângulo entre o raio da câmera e a vertical), a mesma ideia do modo
+"Mosaic", que é o padrão do Metashape: é a vista em que esse deslocamento
+é menor. Só onde as duas melhores vistas diferem por menos de
+`SEAM_BLEND_DEG` (2°) elas são misturadas, para a emenda não ficar dura —
+a ~100 m de altura isso dá uma transição de ~3–4 m. Implementado em uma
+passada só por tile, guardando a melhor e a segunda melhor vista por
+pixel (memória continua limitada ao tile). `feather_fraction`/
+`--feather-fraction` foram removidos.
+
+**2. Corte da borda vista só de lado.** O nosso mosaico ia ~119 m mais a
+leste e ~59 m mais ao sul que o do Pix4D, e era exatamente ali que
+apareciam as faixas esticadas: chão visto só no cantinho das fotos mais
+externas, em ângulo muito inclinado. Agora um pixel cuja melhor vista
+ainda é mais oblíqua que `OrthoConfig.max_view_angle_deg` (padrão 30°;
+uma foto nadir do Mavic 3M alcança ~28° no lado curto) fica vazio.
+CLI: `--max-view-angle`.
+
+**3. Formato do arquivo.** O usuário vinha rodando um script próprio no
+QGIS só para reorganizar o GeoTIFF (blocos, compressão, pirâmides); o
+arquivo cru de 1,09 GB caía para 355 MB. Agora a Fase 6 já grava assim:
+RGB de 3 bandas, blocos 512×512, compressão JPEG (YCbCr, qualidade 90,
+escolha do usuário, como o Pix4D faz), pirâmides internas (AVERAGE) e
+**máscara interna sem perda** marcando a área vazia. A combinação JPEG +
+NoData=0 foi descartada de propósito: o JPEG altera valores perto de
+zero, então sombras válidas virariam transparentes (furos) e a borda
+vazia viraria uma moldura cinza. O usuário escolheu a máscara entre as
+opções. Um experimento isolado antes da implementação confirmou, com o
+GDAL 3.10: máscara lida de volta idêntica, erro médio do JPEG de ~1/255
+dentro da área válida e pirâmides respeitando a máscara. A visualização
+da GUI passou a ler RGB + máscara, o que serve tanto para os arquivos
+novos quanto para os RGBA antigos.
+
+**Validado** (cena sintética):
+- Uma das câmeras teve a imagem trocada por vermelho puro. No ponto nadir
+  dela, o mosaico sai vermelho; no ponto nadir da vizinha (ainda dentro da
+  foto vermelha, mas vista mais na vertical pela vizinha), sai a cor
+  verdadeira do terreno, sem tom vermelho. Forçando a mistura em toda a
+  sobreposição, o mesmo teste falha (o pixel sai rosado).
+- Com 10°, todo pixel mantido fica a no máximo tan(10°) × altura de voo
+  do ponto nadir de alguma câmera. A contagem de pixels válidos cresce de
+  10° para 30° e de 30° para sem corte.
+- O arquivo sai com 3 bandas, JPEG/YCbCr, blocos 512×512, máscara por
+  dataset e pirâmides, e a máscara bate com `num_valid_pixels`.
+- Os testes anteriores (cores conhecidas com erro médio < 8/255, tile
+  gigante igual a tile de 8 px byte a byte) continuam passando com JPEG.
+
+**Ainda não validado em voo real**: precisa rodar `htrmapper ortho` de
+novo sobre a nuvem do referencial local (seção 25) e comparar no QGIS
+com o Pix4D.

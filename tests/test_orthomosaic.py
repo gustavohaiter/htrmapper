@@ -81,9 +81,9 @@ def test_orthomosaic_reconstructs_known_terrain_colors(tmp_path: Path):
     assert result.num_valid_pixels > 0
 
     with rasterio.open(result.raster_path) as src:
-        assert src.count == 4
+        assert src.count == 3
         rgb = src.read([1, 2, 3])
-        alpha = src.read(4)
+        alpha = src.read_masks(1)
         transform = src.transform
 
         rng = np.random.default_rng(0)
@@ -118,19 +118,19 @@ def test_orthomosaic_has_transparent_nodata_outside_coverage(tmp_path: Path):
     result = run_orthomosaic_generation(reconstruction_path, images_dir, dem_path, tmp_path / "ortho.tif")
 
     with rasterio.open(result.raster_path) as src:
-        alpha = src.read(4)
+        alpha = src.read_masks(1)
         # The DEM extends with a margin beyond the actual camera coverage,
-        # so the far corners should be nodata (alpha == 0).
+        # so the far corners should be masked out.
         assert alpha[0, 0] == 0
         assert alpha[-1, -1] == 0
         assert np.any(alpha == 255)
 
 
-def test_ortho_config_rejects_invalid_feather_fraction():
+def test_ortho_config_rejects_invalid_max_view_angle():
     with pytest.raises(ValueError):
-        OrthoConfig(feather_fraction=0.0)
+        OrthoConfig(max_view_angle_deg=0.0)
     with pytest.raises(ValueError):
-        OrthoConfig(feather_fraction=0.6)
+        OrthoConfig(max_view_angle_deg=90.0)
 
 
 def test_raises_when_reconstruction_missing(tmp_path: Path):
@@ -231,3 +231,94 @@ def test_explicit_resolution_overrides_automatic_estimate(tmp_path: Path):
 
     assert result.resolution_source == "user-defined"
     assert result.resolution_m == pytest.approx(forced_resolution)
+
+
+def _camera_centers(reconstruction_path: Path) -> dict[str, np.ndarray]:
+    import pycolmap
+
+    reconstruction = pycolmap.Reconstruction(str(reconstruction_path))
+    return {
+        reconstruction.image(i).name: np.array(reconstruction.image(i).projection_center())
+        for i in reconstruction.reg_image_ids()
+    }
+
+
+def _pixel_at(src, x: float, y: float) -> tuple[np.ndarray, int]:
+    row, col = rasterio.transform.rowcol(src.transform, x, y)
+    window = rasterio.windows.Window(col, row, 1, 1)
+    return src.read(window=window)[:, 0, 0].astype(np.float64), int(src.read_masks(1, window=window)[0, 0])
+
+
+def test_each_pixel_comes_from_the_most_nadir_camera_not_an_average(tmp_path: Path):
+    # Regression test for the blur on the first real flight (ARCHITECTURE.md
+    # seção 26): averaging every overlapping view ghosts any DEM height
+    # error. One camera's image is replaced by solid red: at its own nadir
+    # point the mosaic must be red (it is the most vertical view there),
+    # and at a neighbor's nadir point -- still inside the red camera's
+    # footprint, but seen more vertically by the neighbor -- it must be the
+    # true terrain color, with no red tint. A plain average would tint both.
+    spec, terrain, images_dir, reconstruction_path, dem_path = _setup_ground_truth_scene(tmp_path)
+    centers = _camera_centers(reconstruction_path)
+    red_name = sorted(centers)[0]
+    neighbor_name = min(
+        (n for n in centers if n != red_name), key=lambda n: np.linalg.norm(centers[n][:2] - centers[red_name][:2])
+    )
+    with PILImage.open(images_dir / red_name) as img:
+        size = img.size
+    PILImage.new("RGB", size, (255, 0, 0)).save(images_dir / red_name, quality=95)
+
+    result = run_orthomosaic_generation(reconstruction_path, images_dir, dem_path, tmp_path / "ortho.tif")
+
+    with rasterio.open(result.raster_path) as src:
+        red_color, red_mask = _pixel_at(src, *centers[red_name][:2])
+        neighbor_color, neighbor_mask = _pixel_at(src, *centers[neighbor_name][:2])
+
+    assert red_mask == 255 and neighbor_mask == 255
+    assert np.abs(red_color - [255, 0, 0]).max() < 25
+    true_color = _terrain_color_at(terrain, spec, *centers[neighbor_name][:2])
+    assert np.abs(neighbor_color - true_color).mean() < 10
+
+
+def test_pixels_seen_only_obliquely_are_cropped(tmp_path: Path):
+    spec, terrain, images_dir, reconstruction_path, dem_path = _setup_ground_truth_scene(tmp_path)
+    centers = np.array(list(_camera_centers(reconstruction_path).values()))
+
+    loose = run_orthomosaic_generation(
+        reconstruction_path, images_dir, dem_path, tmp_path / "loose.tif", OrthoConfig(max_view_angle_deg=None)
+    )
+    default = run_orthomosaic_generation(reconstruction_path, images_dir, dem_path, tmp_path / "default.tif")
+    tight = run_orthomosaic_generation(
+        reconstruction_path, images_dir, dem_path, tmp_path / "tight.tif", OrthoConfig(max_view_angle_deg=10.0)
+    )
+
+    assert tight.num_valid_pixels < default.num_valid_pixels < loose.num_valid_pixels
+
+    # Geometric check on the tight result: on this flat terrain, every kept
+    # pixel must lie within tan(10 deg) * flying height of some camera's
+    # nadir point (plus half a pixel diagonal for the pixel-center grid).
+    with rasterio.open(tight.raster_path) as src:
+        mask = src.read_masks(1) > 0
+        rows, cols = np.nonzero(mask)
+        xs, ys = rasterio.transform.xy(src.transform, rows, cols)
+        tolerance = src.res[0]
+    xy = np.column_stack([xs, ys])
+    nearest = np.min(np.linalg.norm(xy[:, None, :] - centers[None, :, :2], axis=2), axis=1)
+    height = centers[0, 2] - spec.terrain_elevation_m
+    assert nearest.max() <= np.tan(np.radians(10.0)) * height + tolerance
+
+
+def test_output_is_tiled_jpeg_with_internal_mask_and_overviews(tmp_path: Path):
+    spec, terrain, images_dir, reconstruction_path, dem_path = _setup_ground_truth_scene(tmp_path)
+
+    result = run_orthomosaic_generation(reconstruction_path, images_dir, dem_path, tmp_path / "ortho.tif")
+
+    with rasterio.open(result.raster_path) as src:
+        assert max(src.width, src.height) > 512  # so overviews are actually expected here
+        assert src.count == 3
+        assert src.compression == rasterio.enums.Compression.jpeg
+        assert src.photometric == rasterio.enums.PhotometricInterp.ycbcr
+        assert src.block_shapes[0] == (512, 512)
+        assert src.mask_flag_enums[0] == [rasterio.enums.MaskFlags.per_dataset]
+        assert src.overviews(1)
+        mask = src.read_masks(1)
+    assert int((mask > 0).sum()) == result.num_valid_pixels

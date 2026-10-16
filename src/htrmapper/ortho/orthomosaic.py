@@ -5,16 +5,13 @@ output pixel, the terrain height comes from the per-pixel DEM (Phase 5),
 so terrain relief is handled correctly -- unlike the naive "single average
 plane" ortho the project brief explicitly warns against (ARCHITECTURE.md
 section 6). What it does NOT do is per-pixel visibility/occlusion
-(z-buffer) checking: an object taller than the DSM surface at a given
-(x, y) -- there is no such object here since the DSM already includes
-canopy/structures, but a *different* nearby tall object between the camera
-and a lower point can still project onto that lower point's pixel
-incorrectly. That "leaning"/double-mapping artifact around vertical
-features is the one thing a full 3D true-ortho (ray-casting with a
-per-pixel visibility test against the whole scene) avoids and this
-implementation does not. This is stated explicitly, per the project's
-rule against overstating precision -- never call this "true-ortho"
-without this caveat attached.
+(z-buffer) checking: a nearby tall object between the camera and a lower
+point can still project onto that lower point's pixel incorrectly. That
+"leaning"/double-mapping artifact around vertical features is the one
+thing a full 3D true-ortho (ray-casting with a per-pixel visibility test
+against the whole scene) avoids and this implementation does not. Choosing
+the most-nadir view per pixel (below) keeps that artifact as small as the
+flight allows, but does not eliminate it -- never call this "true-ortho".
 
 Built by reusing COLMAP's own camera model directly (`Image.cam_from_world`,
 `Camera.img_from_cam` -- the same projection used for reprojection error
@@ -24,64 +21,51 @@ never has to also handle lens distortion). No custom camera math, no
 custom raster I/O (`rasterio`/GDAL) -- per the architecture decision to
 build on mature libraries.
 
-**Resolution is independent of the DEM's own resolution** (real-world bug
-found and fixed on 2026-10-07, see ARCHITECTURE.md): the orthomosaic used
-to simply reuse the DEM's raster grid pixel-for-pixel, so a DEM generated
-coarse (e.g. from a sparse dense cloud, or a deliberately low DEM quality
-tier for a quick volumetria-irrelevant flight) silently forced the
-orthomosaic coarse too -- 2.46 m/px on a real 56-photo flight whose actual
-photographed ground resolution was ~2.5 cm/px, a ~100x gap, confirmed
-against a real Pix4Dfields export of the same flight. Commercial tools
-(Pix4D/Metashape) never couple these two: the DEM/mesh is only a terrain
-height lookup for orthorectification, and the orthomosaic itself is
-rendered close to native image GSD. This module now builds its own output
-grid (same ground footprint/bounding box as the DEM, but at an
-independently chosen resolution) and resamples the DEM's elevation surface
-onto it (bilinear, via `scipy.interpolate.RegularGridInterpolator` -- no
-hand-rolled resampling). The default resolution, when not given explicitly,
-is estimated directly from each registered camera's real (bundle-adjusted)
-height above the DEM terrain and its calibrated focal length in pixels --
-the same pinhole GSD formula as `geo.gsd`, but using actual reconstructed
-geometry instead of EXIF/nominal flying height, which is more accurate
-(this is exactly the "more accurate, post-alignment" GSD recomputation
-`geo/gsd.py`'s own docstring anticipated).
+**Resolution is independent of the DEM's own resolution** (ARCHITECTURE.md
+section 17): the output grid covers the DEM's footprint at its own
+resolution, and the DEM's elevation surface is resampled onto it
+(bilinear, `scipy.interpolate.RegularGridInterpolator`). The default
+resolution is estimated from each registered camera's real height above
+the DEM terrain and its calibrated focal length in pixels.
 
-Blending: each candidate camera contributes a weighted vote to every
-output pixel it can see, weighted by distance-to-image-edge ("feathering",
-per the project brief) -- pixels near a source image's border are
-down-weighted so the seam between two overlapping images fades smoothly
-instead of showing a hard edge. This is a documented, simple blending
-strategy; graph-cut seamline optimization (what mature commercial tools
-use to avoid blending across moving objects/parallax errors) is not
-implemented here.
+**Processed in tiles, never as one whole-grid array in RAM** (ARCHITECTURE.md
+section 17): only one `TILE_SIZE_PX` tile's coordinates/elevation/colors
+exist at a time, each written to the GeoTIFF via a windowed write. Each
+camera's approximate ground footprint is precomputed once (by projecting
+the DEM's own small grid) and used as a per-tile candidate pre-filter.
 
-**Processed in tiles, never as one whole-grid array in RAM** (real bug
-found and fixed on 2026-10-07, same day as the resolution-decoupling fix
-above and the direct cause of it: once the orthomosaic rendered near
-native image GSD instead of the DEM's coarse resolution, a real 56-photo
-flight's output grid grew to ~168 million pixels, and the previous
-single-pass implementation held several full-grid float64 arrays (color
-accumulator, weight accumulator, world coordinates, elevation) in memory
-simultaneously -- OOM-killed on the user's own machine on first real use
-at native resolution). Professional tools (Pix4D/Metashape) never hold a
-whole large orthomosaic in RAM either; they process it in blocks. This
-module now does the same: the output raster is split into fixed-size
-tiles (`TILE_SIZE_PX`), and for each tile only that tile's world
-coordinates/elevation/accumulators are ever materialized, written to the
-GeoTIFF via a windowed write, then discarded before the next tile. Peak
-memory is therefore bounded by tile size, never by total output size.
-To avoid every camera being tested against every tile (correct but
-wasteful), each registered camera's approximate ground footprint is
-precomputed once up front (by reprojecting the DEM's own, much smaller,
-native-resolution grid through that camera -- reusing the same camera
-projection math, just applied to fewer points) and used as a cheap
-bounding-box pre-filter per tile.
+**Most-nadir view per pixel ("mosaic" blending), not an average**
+(ARCHITECTURE.md section 26). Each pixel takes its color from the camera
+that sees it closest to vertical (smallest angle between the camera ray
+and the vertical), the same idea as Metashape's default "Mosaic"
+blending. Averaging every overlapping view -- what this module did before
+-- turns any height error in the DEM (crop canopy, trees, a sparse cloud)
+into ghosting, because each view displaces the misplaced pixel in a
+different direction; the most-nadir view is the one that displacement is
+smallest for. Only near the seam between two cameras, where their view
+angles differ by less than `SEAM_BLEND_DEG`, are the two best views mixed,
+so seams fade instead of showing a hard edge.
+
+**Cropped to well-observed ground** (ARCHITECTURE.md section 26): a pixel
+whose most-nadir view is still more oblique than
+`OrthoConfig.max_view_angle_deg` is left empty. Those are the fringes only
+seen at the very edge of the outermost photos, where relief displacement
+is largest and the result is smeared streaks -- the area Pix4D/Metashape
+also crop away.
+
+**Output format** (ARCHITECTURE.md section 26): 3-band RGB GeoTIFF, tiled
+512x512, JPEG-compressed (YCbCr), with an internal lossless mask marking
+the empty area and internal overviews -- the layout the user's own QGIS
+optimizer script produced as an extra step. The mask, not NoData, marks
+empty pixels: JPEG is lossy, so with NoData=0 dark-but-valid pixels would
+turn transparent and the empty border would turn into a gray frame.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from math import radians
 from pathlib import Path
 
 import numpy as np
@@ -89,45 +73,58 @@ import pycolmap
 import rasterio
 import rasterio.transform
 from PIL import Image as PILImage
+from rasterio.enums import Resampling
 from rasterio.transform import from_origin
 from rasterio.windows import Window
 from scipy.interpolate import RegularGridInterpolator
 
-# Width of the feathering zone, as a fraction of the source image's
-# shorter side. A pixel exactly on the image border gets weight 0; a
-# pixel this fraction of the image size (or further) from every border
-# gets full weight 1, with a linear ramp in between. 10% is a common,
-# unremarkable default for edge feathering -- large enough to visibly
-# smooth seams, small enough not to discard most of small, single images.
-FEATHER_FRACTION = 0.1
-
-# Tile side length, in output pixels. 2048x2048 keeps every per-tile
-# float64 array well under a few hundred MB (2048*2048*3*8 bytes = 100MB
-# for the color accumulator alone, the largest one) regardless of how
-# large the full orthomosaic is -- the entire point of tiling. Not
-# exposed as user config for now: it only trades a little overhead
-# (re-testing camera candidates per tile) for memory headroom, and 2048
-# is a safe, unremarkable default (also GDAL's own common internal tiling
-# block size).
+# Processing tile side, in output pixels. Bounds per-tile memory (the
+# largest per-tile arrays are a few hundred MB) regardless of total output
+# size. Must stay a multiple of OUTPUT_BLOCK_PX, so every JPEG block of the
+# output file is written exactly once (a block written in two halves would
+# be decompressed and recompressed, losing quality twice).
 TILE_SIZE_PX = 2048
+
+# GeoTIFF internal tile size: 512x512 is the modern GDAL/COG default and
+# what the user's QGIS optimizer script uses.
+OUTPUT_BLOCK_PX = 512
+
+# Visually lossless for aerial RGB, and roughly what Pix4Dfields' JPEG
+# exports correspond to in bytes per pixel.
+JPEG_QUALITY = 90
+
+# Two cameras whose view angles to a pixel differ by less than this are
+# mixed (50/50 at equal angles, ramping to the better one at this
+# difference). At ~100 m flying height, the angle difference between two
+# neighboring cameras changes by ~1 degree per meter across their seam, so
+# 2 degrees gives a ~3-4 m soft transition.
+SEAM_BLEND_DEG = 2.0
+
+# Pixels whose most-nadir view is more oblique than this are left empty.
+# A nadir Mavic 3M frame reaches ~28 degrees off-vertical along its short
+# side, so 30 degrees keeps everything inside the flight block and about
+# one footprint-half beyond the outermost line, and drops the extreme-edge
+# fringe that came out as smeared streaks on the first real flight.
+DEFAULT_MAX_VIEW_ANGLE_DEG = 30.0
 
 
 class OrthoError(RuntimeError):
     """Raised when orthomosaic generation cannot proceed at all (missing
     inputs). A mosaic with holes where no camera saw the ground is not an
-    error -- those pixels are marked NoData (alpha = 0), never hidden."""
+    error -- those pixels are masked out, never hidden."""
 
 
 @dataclass
 class OrthoConfig:
-    feather_fraction: float = FEATHER_FRACTION
     resolution_m: float | None = None  # None = automatic, from camera GSD (see module docstring)
+    # None = keep every pixel any camera sees, however obliquely.
+    max_view_angle_deg: float | None = DEFAULT_MAX_VIEW_ANGLE_DEG
 
     def __post_init__(self) -> None:
-        if not (0.0 < self.feather_fraction <= 0.5):
-            raise ValueError(f"feather_fraction must be in (0, 0.5], got {self.feather_fraction}")
         if self.resolution_m is not None and self.resolution_m <= 0:
             raise ValueError(f"resolution_m must be positive, got {self.resolution_m}")
+        if self.max_view_angle_deg is not None and not (0.0 < self.max_view_angle_deg < 90.0):
+            raise ValueError(f"max_view_angle_deg must be in (0, 90), got {self.max_view_angle_deg}")
 
 
 @dataclass
@@ -168,32 +165,21 @@ def _load_dem_grid(dem_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, 
     return world_x, world_y, elevation, transform, crs_wkt
 
 
-def _bilinear_sample(image: np.ndarray, u: np.ndarray, v: np.ndarray, valid: np.ndarray) -> np.ndarray:
+def _bilinear_sample(image: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
     """Bilinear sampling of an (H, W, 3) uint8 image at fractional pixel
-    coordinates (u=column, v=row). Returns float64 colors; entries where
-    `valid` is False are left as zero (caller must not use them)."""
+    coordinates (u=column, v=row), all assumed inside the image."""
     height, width = image.shape[:2]
-    out = np.zeros((u.shape[0], 3), dtype=np.float64)
-    if not np.any(valid):
-        return out
-
-    uu = u[valid]
-    vv = v[valid]
-    x0 = np.clip(np.floor(uu).astype(np.int64), 0, width - 1)
+    x0 = np.clip(np.floor(u).astype(np.int64), 0, width - 1)
     x1 = np.clip(x0 + 1, 0, width - 1)
-    y0 = np.clip(np.floor(vv).astype(np.int64), 0, height - 1)
+    y0 = np.clip(np.floor(v).astype(np.int64), 0, height - 1)
     y1 = np.clip(y0 + 1, 0, height - 1)
 
-    fx = np.clip(uu - x0, 0.0, 1.0)
-    fy = np.clip(vv - y0, 0.0, 1.0)
+    fx = np.clip(u - x0, 0.0, 1.0).astype(np.float32)[:, None]
+    fy = np.clip(v - y0, 0.0, 1.0).astype(np.float32)[:, None]
 
-    img_f = image.astype(np.float64)
-    top = img_f[y0, x0] * (1 - fx)[:, None] + img_f[y0, x1] * fx[:, None]
-    bottom = img_f[y1, x0] * (1 - fx)[:, None] + img_f[y1, x1] * fx[:, None]
-    sampled = top * (1 - fy)[:, None] + bottom * fy[:, None]
-
-    out[valid] = sampled
-    return out
+    top = image[y0, x0] * (1 - fx) + image[y0, x1] * fx
+    bottom = image[y1, x0] * (1 - fx) + image[y1, x1] * fx
+    return top * (1 - fy) + bottom * fy
 
 
 def _estimate_resolution_from_cameras(
@@ -202,12 +188,9 @@ def _estimate_resolution_from_cameras(
     """Estimate ground resolution (m/px) from each registered camera's real
     height above the DEM terrain and its calibrated focal length in pixels
     -- GSD = height_above_terrain / focal_length_px, the standard pinhole
-    formula (see module docstring for why this is more accurate than the
-    EXIF/nominal-altitude estimate in `geo.gsd`). Returns the median across
-    cameras with a valid terrain sample underneath them (robust against the
-    odd camera whose nadir point falls just outside DEM coverage or over a
-    nodata cell); None if no camera qualifies, so the caller can fall back
-    to a safe default instead of dividing by a fabricated number.
+    formula. Returns the median across cameras with a valid terrain sample
+    underneath them; None if no camera qualifies, so the caller can fall
+    back to a safe default instead of dividing by a fabricated number.
     """
     estimates = []
     for image_id in reconstruction.reg_image_ids():
@@ -235,11 +218,8 @@ def _estimate_resolution_from_cameras(
 def _output_geometry(
     dem_transform: rasterio.Affine, dem_width: int, dem_height: int, resolution_m: float
 ) -> tuple[int, int, rasterio.Affine]:
-    """Compute the orthomosaic's output raster shape/transform at
-    `resolution_m`, covering the same ground footprint (bounding box) as
-    the DEM -- pure arithmetic, no array allocation, so this is cheap to
-    call even when the resulting grid is hundreds of millions of pixels.
-    """
+    """Output raster shape/transform at `resolution_m` over the DEM's
+    footprint -- pure arithmetic, no array allocation."""
     min_x = dem_transform.c
     max_y = dem_transform.f
     max_x = min_x + dem_width * dem_transform.a
@@ -254,11 +234,8 @@ def _output_geometry(
 def _build_dem_interpolator(
     dem_transform: rasterio.Affine, dem_width: int, dem_height: int, dem_elevation: np.ndarray
 ) -> RegularGridInterpolator:
-    """Build a reusable (row, col) -> elevation interpolator over the DEM's
-    own (small, native-resolution) grid -- built once, then evaluated per
-    output tile, never re-built per tile and never evaluated over the
-    whole (potentially huge) output grid at once.
-    """
+    """Reusable (y, x) -> elevation interpolator over the DEM's own grid --
+    built once, evaluated per output tile."""
     min_x = dem_transform.c
     max_y = dem_transform.f
 
@@ -278,18 +255,10 @@ def _build_dem_interpolator(
 def _camera_footprint_bbox(
     image: "pycolmap.Image", dem_world_x: np.ndarray, dem_world_y: np.ndarray, dem_elevation: np.ndarray
 ) -> tuple[float, float, float, float] | None:
-    """Approximate a registered camera's ground footprint, as a world-space
-    bounding box (min_x, max_x, min_y, max_y), by reprojecting the DEM's
-    own native-resolution grid through it -- the same projection math as
-    the main per-tile loop, just applied once to the DEM's (much smaller)
-    grid instead of per-tile to the (potentially huge) output grid. Used
-    only as a cheap per-tile candidate pre-filter, never as the final
-    per-pixel visibility test -- a coarse DEM cell near the camera's true
-    edge could make this bbox slightly too tight or too loose, which is
-    fine for a pre-filter but would not be for the real test. Returns None
-    if the camera sees no DEM terrain at all (never a candidate for any
-    tile).
-    """
+    """Approximate world-space bounding box (min_x, max_x, min_y, max_y) of
+    a camera's ground footprint, by projecting the DEM's own small grid
+    through it. Only a cheap per-tile pre-filter, never the final
+    per-pixel test. None if the camera sees no DEM terrain at all."""
     valid_terrain = ~np.isnan(dem_elevation)
     if not np.any(valid_terrain):
         return None
@@ -343,15 +312,17 @@ def _iter_tiles(
             yield row_off, col_off, tile_height, tile_width, tile_world_x, tile_world_y
 
 
-def _feather_weight(u: np.ndarray, v: np.ndarray, width: int, height: int, feather_fraction: float) -> np.ndarray:
-    feather_px = feather_fraction * min(width, height)
-    dist_left = u
-    dist_right = (width - 1) - u
-    dist_top = v
-    dist_bottom = (height - 1) - v
-    edge_dist = np.minimum(np.minimum(dist_left, dist_right), np.minimum(dist_top, dist_bottom))
-    weight = np.clip(edge_dist / feather_px, 0.0, 1.0)
-    return weight
+def _overview_levels(width_px: int, height_px: int) -> list[int]:
+    """Factors 2, 4, 8, ... until the smallest overview fits in one block."""
+    max_dim = max(width_px, height_px)
+    levels: list[int] = []
+    factor = 2
+    while max_dim > OUTPUT_BLOCK_PX:
+        levels.append(factor)
+        if -(-max_dim // factor) <= OUTPUT_BLOCK_PX:
+            break
+        factor *= 2
+    return levels
 
 
 def run_orthomosaic_generation(
@@ -363,22 +334,17 @@ def run_orthomosaic_generation(
     cancellation_token: "pycolmap.CancellationToken | None" = None,
     progress_callback: "Callable[[int, int], None] | None" = None,
 ) -> OrthoResult:
-    """Generate a georeferenced RGBA orthomosaic GeoTIFF.
+    """Generate a georeferenced orthomosaic GeoTIFF (RGB + internal mask).
 
     `reconstruction_path`/`undistorted_image_path` must be the pair
     Phase 4's `pycolmap.undistort_images` wrote (undistorted images +
     matching PINHOLE-model reconstruction) -- never the original distorted
     images, since sampling here does not itself correct for distortion.
 
-    Processed tile by tile (see module docstring) to bound peak memory
-    regardless of the output raster's total size. `progress_callback`,
-    when given, is called with `(tiles_done, tiles_total)` after each tile
-    is written -- real, fine-grained progress (never fabricated), just at
-    tile granularity rather than per-camera as before tiling existed.
-    `cancellation_token` (a `pycolmap.CancellationToken`, reused here
-    purely as a cheap thread-safe flag -- no pycolmap call is made in this
-    loop) is checked once per tile; if cancelled, raises
-    `InterruptedError` to match pycolmap's own convention.
+    `progress_callback`, when given, is called with `(tiles_done,
+    tiles_total)` after each tile is written. `cancellation_token` (reused
+    purely as a thread-safe flag) is checked once per tile; if cancelled,
+    raises `InterruptedError` to match pycolmap's own convention.
     """
     config = config or OrthoConfig()
     reconstruction_path = Path(reconstruction_path)
@@ -410,21 +376,14 @@ def run_orthomosaic_generation(
             resolution_source = "automatic (camera GSD)"
         else:
             # No registered camera had a usable terrain sample underneath
-            # it (e.g. every nadir point fell outside DEM coverage) -- fall
-            # back to the DEM's own resolution rather than fabricating a
-            # number or crashing; this matches the old (pre-fix) behavior
-            # only in this degenerate case.
+            # it -- fall back to the DEM's own resolution rather than
+            # fabricating a number or crashing.
             resolution_m = abs(dem_transform.a)
             resolution_source = "automatic (fallback: DEM resolution)"
 
     width_px, height_px, transform = _output_geometry(dem_transform, dem_width_px, dem_height_px, resolution_m)
     interpolator = _build_dem_interpolator(dem_transform, dem_width_px, dem_height_px, dem_elevation)
 
-    # Precompute each registered camera's approximate ground footprint
-    # once, up front -- a cheap per-tile candidate pre-filter (see
-    # `_camera_footprint_bbox` docstring). Cameras with a missing image
-    # file or no DEM overlap at all are dropped here once, rather than
-    # being re-checked on every tile.
     dem_cell_diag = float(np.hypot(abs(dem_transform.a), abs(dem_transform.e)))
     cameras: list[dict] = []
     for image_id in registered_ids:
@@ -440,11 +399,15 @@ def run_orthomosaic_generation(
                 "image_id": image_id,
                 "image": image,
                 "camera": image.camera,
+                "center": np.asarray(image.projection_center(), dtype=np.float64),
                 "image_path": image_path,
                 "bbox": bbox,
                 "cache": None,  # lazily holds the decoded (H, W, 3) uint8 array
             }
         )
+
+    max_angle_rad = radians(config.max_view_angle_deg) if config.max_view_angle_deg is not None else None
+    seam_rad = radians(SEAM_BLEND_DEG)
 
     tile_specs = list(_iter_tiles(width_px, height_px, transform, TILE_SIZE_PX))
     num_tiles_total = len(tile_specs)
@@ -454,18 +417,31 @@ def run_orthomosaic_generation(
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with rasterio.open(
+    gdal_env = rasterio.Env(
+        GDAL_TIFF_INTERNAL_MASK=True,
+        COMPRESS_OVERVIEW="JPEG",
+        PHOTOMETRIC_OVERVIEW="YCBCR",
+        JPEG_QUALITY_OVERVIEW=str(JPEG_QUALITY),
+        INTERLEAVE_OVERVIEW="PIXEL",
+    )
+    with gdal_env, rasterio.open(
         output_path,
         "w",
         driver="GTiff",
         height=height_px,
         width=width_px,
-        count=4,
+        count=3,
         dtype=rasterio.uint8,
         crs=crs_wkt,
         transform=transform,
-        photometric="RGB",
-        alpha="yes",
+        tiled=True,
+        blockxsize=OUTPUT_BLOCK_PX,
+        blockysize=OUTPUT_BLOCK_PX,
+        compress="JPEG",
+        photometric="YCBCR",
+        jpeg_quality=JPEG_QUALITY,
+        interleave="pixel",
+        bigtiff="IF_SAFER",
     ) as dst:
         for tile_index, (row_off, col_off, tile_height, tile_width, tile_world_x, tile_world_y) in enumerate(
             tile_specs, start=1
@@ -473,25 +449,30 @@ def run_orthomosaic_generation(
             if cancellation_token is not None and cancellation_token.is_cancelled:
                 raise InterruptedError("Operation cancelled")
 
+            num_pixels = tile_height * tile_width
             tile_query = np.stack([tile_world_y.ravel(), tile_world_x.ravel()], axis=1)
-            tile_elevation = interpolator(tile_query).reshape(tile_world_y.shape)
+            tile_elevation = interpolator(tile_query)
 
-            color_accum = np.zeros((tile_height, tile_width, 3), dtype=np.float64)
-            weight_accum = np.zeros((tile_height, tile_width), dtype=np.float64)
+            # Per pixel: the best and second-best view (highest score =
+            # smallest angle from vertical), their colors and cameras.
+            best1 = np.full(num_pixels, -np.inf)
+            best2 = np.full(num_pixels, -np.inf)
+            color1 = np.zeros((num_pixels, 3), dtype=np.float32)
+            color2 = np.zeros((num_pixels, 3), dtype=np.float32)
+            camera1 = np.full(num_pixels, -1, dtype=np.int64)
+            camera2 = np.full(num_pixels, -1, dtype=np.int64)
 
-            valid_terrain = ~np.isnan(tile_elevation)
-            if np.any(valid_terrain):
-                flat_x = tile_world_x[valid_terrain]
-                flat_y = tile_world_y[valid_terrain]
-                flat_z = tile_elevation[valid_terrain]
-                flat_indices = np.argwhere(valid_terrain)
-                world_points = np.stack([flat_x, flat_y, flat_z], axis=1)
-
+            terrain_idx = np.flatnonzero(~np.isnan(tile_elevation))
+            if terrain_idx.size:
+                world_points = np.stack(
+                    [tile_world_x.ravel()[terrain_idx], tile_world_y.ravel()[terrain_idx], tile_elevation[terrain_idx]],
+                    axis=1,
+                )
                 tile_bbox = (
-                    float(flat_x.min()),
-                    float(flat_x.max()),
-                    float(flat_y.min()),
-                    float(flat_y.max()),
+                    float(world_points[:, 0].min()),
+                    float(world_points[:, 0].max()),
+                    float(world_points[:, 1].min()),
+                    float(world_points[:, 1].max()),
                 )
 
                 for entry in cameras:
@@ -503,47 +484,71 @@ def run_orthomosaic_generation(
                     pixel_coords = camera.img_from_cam(cam_points, check_cheirality=True)
                     u = pixel_coords[:, 0]
                     v = pixel_coords[:, 1]
-                    valid = (
+                    visible = (
                         ~np.isnan(u)
                         & (u >= 0)
                         & (u <= camera.width - 1)
                         & (v >= 0)
                         & (v <= camera.height - 1)
                     )
-                    if not np.any(valid):
+                    if not np.any(visible):
+                        continue
+
+                    offsets = world_points[visible] - entry["center"]
+                    score = -np.arctan2(np.hypot(offsets[:, 0], offsets[:, 1]), -offsets[:, 2])
+                    idx = terrain_idx[visible]
+
+                    becomes_first = score > best1[idx]
+                    becomes_second = ~becomes_first & (score > best2[idx])
+                    if not (np.any(becomes_first) or np.any(becomes_second)):
                         continue
 
                     if entry["cache"] is None:
                         entry["cache"] = np.asarray(PILImage.open(entry["image_path"]).convert("RGB"))
-                    src_image = entry["cache"]
+                    colors = _bilinear_sample(entry["cache"], u[visible], v[visible])
 
-                    colors = _bilinear_sample(src_image, u, v, valid)
-                    weights = np.zeros_like(u)
-                    weights[valid] = _feather_weight(
-                        u[valid], v[valid], camera.width, camera.height, config.feather_fraction
-                    )
+                    first = idx[becomes_first]
+                    best2[first] = best1[first]
+                    color2[first] = color1[first]
+                    camera2[first] = camera1[first]
+                    best1[first] = score[becomes_first]
+                    color1[first] = colors[becomes_first]
+                    camera1[first] = entry["image_id"]
 
-                    rows = flat_indices[valid, 0]
-                    cols = flat_indices[valid, 1]
-                    np.add.at(color_accum, (rows, cols), colors[valid] * weights[valid, None])
-                    np.add.at(weight_accum, (rows, cols), weights[valid])
-                    used_camera_ids.add(entry["image_id"])
+                    second = idx[becomes_second]
+                    best2[second] = score[becomes_second]
+                    color2[second] = colors[becomes_second]
+                    camera2[second] = entry["image_id"]
 
-            has_data = weight_accum > 0
-            rgb = np.zeros((tile_height, tile_width, 3), dtype=np.uint8)
-            rgb[has_data] = np.clip(color_accum[has_data] / weight_accum[has_data, None], 0, 255).astype(np.uint8)
-            alpha = np.where(has_data, 255, 0).astype(np.uint8)
+            has_data = np.isfinite(best1)
+            if max_angle_rad is not None:
+                has_data &= best1 >= -max_angle_rad
+
+            blended = has_data & np.isfinite(best2)
+            weight1 = np.ones(num_pixels, dtype=np.float32)
+            weight1[blended] = np.clip(0.5 + (best1[blended] - best2[blended]) / (2 * seam_rad), 0.5, 1.0)
+            rgb = color1 * weight1[:, None] + color2 * (1 - weight1)[:, None]
+            rgb[~has_data] = 0
+
+            used_camera_ids.update(np.unique(camera1[has_data]).tolist())
+            used_camera_ids.update(np.unique(camera2[blended & (weight1 < 1)]).tolist())
             num_valid_pixels += int(has_data.sum())
             num_nodata_pixels += int((~has_data).sum())
 
             window = Window(col_off, row_off, tile_width, tile_height)
-            for band_index in range(3):
-                dst.write(rgb[:, :, band_index], band_index + 1, window=window)
-            dst.write(alpha, 4, window=window)
+            tile_rgb = np.clip(np.rint(rgb), 0, 255).astype(np.uint8).reshape(tile_height, tile_width, 3)
+            dst.write(np.moveaxis(tile_rgb, 2, 0), window=window)
+            dst.write_mask((has_data.reshape(tile_height, tile_width) * 255).astype(np.uint8), window=window)
 
             if progress_callback is not None:
                 progress_callback(tile_index, num_tiles_total)
 
+        levels = _overview_levels(width_px, height_px)
+        if levels:
+            dst.build_overviews(levels, Resampling.average)
+            dst.update_tags(ns="rio_overview", resampling="average")
+
+    used_camera_ids.discard(-1)
     return OrthoResult(
         raster_path=str(output_path),
         width_px=width_px,

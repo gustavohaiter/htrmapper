@@ -90,11 +90,8 @@ Implementado nesta fase:
 - **Fase 6** (ortomosaico — **2.5D**, não true-ortho 3D completo, ver
   `ARCHITECTURE.md`): reprojeta as imagens não-distorcidas da Fase 4 no
   plano do DEM da Fase 5, reaproveitando o próprio modelo de câmera do
-  COLMAP (`cam_from_world`/`img_from_cam`), com blending por
-  distância-à-borda ("feathering") entre câmeras sobrepostas. Saída
-  GeoTIFF RGBA (alpha = NoData explícito onde nenhuma câmera viu o
-  terreno). Validado contra cores de terreno conhecidas de uma cena
-  sintética com posições de câmera exatas (erro médio de cor < 8/255) —
+  COLMAP (`cam_from_world`/`img_from_cam`). Validado contra cores de
+  terreno conhecidas de uma cena sintética com posições de câmera exatas (erro médio de cor < 8/255) —
   processo que expôs e corrigiu um bug real de convenção norte-sul na
   fixture de teste compartilhada, sem afetar as fases anteriores.
   **Resolução sempre independente da resolução do DEM** (bug real
@@ -105,9 +102,13 @@ Implementado nesta fase:
   diretamente. **Processado em blocos/tiles** (mesma técnica do Pix4D/
   Metashape — outro bug real corrigido no mesmo dia: em resolução nativa
   sobre uma área real, a grade passou a ter ~168 milhões de pixels e a
-  implementação antiga, de uma vez só, estourou a memória). CLI:
-  `htrmapper ortho [--resolution N]`. GUI: botão "Gerar Ortomosaico…". Ver
-  `ARCHITECTURE.md` seção 17.
+  implementação antiga, de uma vez só, estourou a memória). Cada pixel
+  vem da foto que o vê mais na vertical (como o modo "Mosaic" do
+  Metashape), não da média de todas; a borda vista só de lado é cortada
+  (`--max-view-angle`, padrão 30°). Sai como RGB em JPEG, em blocos, com
+  pirâmides e máscara interna marcando a área vazia. CLI:
+  `htrmapper ortho [--resolution N] [--max-view-angle G]`. GUI: botão
+  "Gerar Ortomosaico…". Ver `ARCHITECTURE.md` seções 17 e 26.
 - **Fase 7** (interface completa): árvore de projeto (Projeto / Imagens /
   Câmeras / Tie Points / Point Cloud / DEM / Orthomosaic). Cada etapa de
   longa duração (Alinhar, Ajustar, Nuvem densa, DEM, Ortomosaico) roda em

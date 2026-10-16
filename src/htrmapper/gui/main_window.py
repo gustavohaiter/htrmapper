@@ -1142,11 +1142,15 @@ class MainWindow(QMainWindow):
                     data = np.where(band == src.nodata, np.nan, band) if src.nodata is not None else band
                     axes.imshow(data, cmap="terrain")
                 else:
-                    data = src.read(
-                        [1, 2, 3, 4], out_shape=(4, out_height, out_width), resampling=Resampling.bilinear
+                    # RGB + the dataset mask: works for the current internal-mask
+                    # files and for older 4-band RGBA ones (GDAL derives the mask
+                    # from the alpha band).
+                    rgb = src.read(
+                        [1, 2, 3], out_shape=(3, out_height, out_width), resampling=Resampling.bilinear
                     )
-                    rgba = np.transpose(data, (1, 2, 0))
-                    axes.imshow(rgba)
+                    mask = src.read_masks(1, out_shape=(out_height, out_width), resampling=Resampling.nearest)
+                    rgba = np.concatenate([rgb, mask[None]], axis=0)
+                    axes.imshow(np.transpose(rgba, (1, 2, 0)))
         except (OSError, rasterio.errors.RasterioIOError):
             pass  # raster no longer on disk -- leave the panel blank rather than crash
         axes.axis("off")
