@@ -720,7 +720,14 @@ class MainWindow(QMainWindow):
             f"RMSE X={result.rmse_x_cm:.3f} cm, Y={result.rmse_y_cm:.3f} cm, Z={result.rmse_z_cm:.3f} cm",
             f"RMSE XY={result.rmse_xy_cm:.3f} cm, Total={result.rmse_total_cm:.3f} cm",
             f"Max error: {result.max_error_cm:.3f} cm",
+            f"Intrínsecos refinados: {', '.join(result.intrinsics_refined) or 'nenhum (fixos)'}",
+            *[f"Aviso: {note}" for note in result.intrinsics_notes],
         ]
+        if result.images_excluded_from_rmse:
+            detail_lines.append(
+                "Fora do RMSE (sem RTK FIX, ponderadas pelo próprio desvio RTK): "
+                + ", ".join(result.images_excluded_from_rmse)
+            )
 
         box = QMessageBox(self)
         box.setWindowTitle("Ajuste (GNSS)")

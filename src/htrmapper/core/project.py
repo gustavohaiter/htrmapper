@@ -197,6 +197,9 @@ class BaSummary:
     converged: bool = False
     reconstruction_path: str = ""
     camera_calibration: dict = field(default_factory=dict)
+    intrinsics_refined: list[str] = field(default_factory=list)
+    intrinsics_notes: list[str] = field(default_factory=list)
+    images_excluded_from_rmse: list[str] = field(default_factory=list)
     ran_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
     def to_dict(self) -> dict:

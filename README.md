@@ -57,8 +57,12 @@ Implementado nesta fase:
   `CameraAccuracy` configurada — nunca como âncora fixa. Validado
   injetando um viés de GNSS conhecido: com sigma apertado a solução segue
   o GNSS; com sigma frouxo, a reprojeção domina e o GNSS ruim é
-  descartado — a prova de que o peso é matemático, não decorativo. CLI:
-  `htrmapper adjust`. GUI: botão "Ajustar (GNSS)…". Preenche as tabelas
+  descartado — a prova de que o peso é matemático, não decorativo. A lente
+  (focal, ponto principal, distorção) é refinada junto, com travas contra
+  valores implausíveis, e cada foto pesa pelo próprio desvio RTK quando
+  ele é maior que o configurado. No voo real isso levou o erro das
+  câmeras RTK FIX de ~30 cm para ~2 cm (ver `ARCHITECTURE.md` seção 27).
+  CLI: `htrmapper adjust` (`--fix-intrinsics` mantém a lente fixa). GUI: botão "Ajustar (GNSS)…". Preenche as tabelas
   "Camera Locations" (RMSE X/Y/Z/XY/Total em cm) e "Camera Calibration"
   do relatório. Ver `ARCHITECTURE.md` seção 14.
 - **Fase 4** (nuvem de pontos densa, sobre o pipeline denso do próprio

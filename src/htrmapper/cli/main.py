@@ -138,7 +138,7 @@ def _cmd_adjust(args: argparse.Namespace) -> int:
         return 1
 
     workdir = Path(args.workdir)
-    config = BaConfig(refine_intrinsics=args.refine_intrinsics)
+    config = BaConfig.with_fixed_intrinsics() if args.fix_intrinsics else BaConfig()
 
     print(f"Adjusting project: {project.name}")
     print(f"GNSS accuracy: xy={project.gnss_accuracy.accuracy.xy_sigma_m} m, z={project.gnss_accuracy.accuracy.z_sigma_m} m")
@@ -158,8 +158,18 @@ def _cmd_adjust(args: argparse.Namespace) -> int:
         f"Z={result.rmse_z_cm:.3f} cm, XY={result.rmse_xy_cm:.3f} cm, Total={result.rmse_total_cm:.3f} cm"
     )
     print(f"Max error: {result.max_error_cm:.3f} cm")
+    if result.images_excluded_from_rmse:
+        print(
+            f"Excluded from RMSE (no RTK FIX, weighted by their own RTK std-dev): "
+            f"{', '.join(result.images_excluded_from_rmse)}"
+        )
+    print(f"Intrinsics refined: {', '.join(result.intrinsics_refined) or 'none (fixed)'}")
+    for note in result.intrinsics_notes:
+        print(f"  warning: {note}")
     for camera_id, data in result.camera_calibration.items():
-        print(f"Camera {camera_id} ({data['model']}, {data['params_info']}): {data['params']}")
+        print(f"Camera {camera_id} ({data['model']}, {data['params_info']}):")
+        print(f"  initial: {[round(v, 6) for v in data['initial_params']]}")
+        print(f"  final:   {[round(v, 6) for v in data['params']]}")
 
     project.ba = result.to_project_summary()
     project.save(project_path)
@@ -395,9 +405,10 @@ def build_parser() -> argparse.ArgumentParser:
     adjust_parser.add_argument("project", help="Path to a project .json file with a Fase 2 (align) result")
     adjust_parser.add_argument("--workdir", required=True, help="Directory for the refined reconstruction")
     adjust_parser.add_argument(
-        "--refine-intrinsics",
+        "--fix-intrinsics",
         action="store_true",
-        help="Also refine focal length/principal point/distortion (risky for nadir-only flat flights; see BaConfig docstring)",
+        help="Keep focal length/principal point/distortion fixed at the Fase 2 values (default: refined, "
+        "with guards against implausible values; see ARCHITECTURE.md section 27)",
     )
     adjust_parser.set_defaults(func=_cmd_adjust)
 

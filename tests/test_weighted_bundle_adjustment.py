@@ -4,8 +4,17 @@ from pathlib import Path
 
 import pytest
 
-from htrmapper.ba.weighted_bundle_adjustment import BaConfig, BaError, run_gnss_weighted_bundle_adjustment
-from htrmapper.core.project import GnssAccuracyConfig, Project, ProjectCrsConfig
+import pycolmap
+
+from htrmapper.ba.weighted_bundle_adjustment import (
+    DEFAULT_MAX_FOCAL_CHANGE_RATIO,
+    DEFAULT_MAX_PRINCIPAL_POINT_OFFSET_RATIO,
+    BaConfig,
+    BaError,
+    _prior_sigmas,
+    run_gnss_weighted_bundle_adjustment,
+)
+from htrmapper.core.project import GnssAccuracyConfig, ImageRecord, Project, ProjectCrsConfig
 from htrmapper.geo.crs import CoordinateReferenceSystem, GeodeticPoint, GeodeticTransformer, ProjectedPoint, wgs84
 from htrmapper.gnss.accuracy import CameraAccuracy
 from htrmapper.io.image_import import import_folder
@@ -43,12 +52,8 @@ def _shift_image_position(project: Project, file_name: str, bias_xyz_m: tuple[fl
     record.altitude = geodetic.alt
 
 
-def test_converges_with_clean_gnss_and_keeps_intrinsics_fixed_by_default(tmp_path: Path):
+def test_converges_with_clean_gnss(tmp_path: Path):
     project, reconstruction_path = _aligned_project_and_reconstruction(tmp_path)
-
-    import pycolmap
-
-    fx_before = next(iter(pycolmap.Reconstruction(str(reconstruction_path)).cameras.items()))[1].params[0]
 
     result = run_gnss_weighted_bundle_adjustment(project, reconstruction_path, tmp_path / "ba_out", BaConfig())
 
@@ -57,13 +62,71 @@ def test_converges_with_clean_gnss_and_keeps_intrinsics_fixed_by_default(tmp_pat
     # Clean, noiseless synthetic scene + tight sigma -> sub-decimeter RMSE.
     assert result.rmse_total_cm < 10.0
     assert result.mean_reprojection_error_px < 1.0
+    assert "distortion" in result.intrinsics_refined
 
-    # refine_intrinsics defaults to False -- fx must be exactly unchanged
-    # from whatever Fase 2 (COLMAP's own incremental BA) produced, not
-    # re-optimized here (see BaConfig docstring on the self-calibration
-    # degeneracy this avoids).
-    calib = next(iter(result.camera_calibration.values()))
-    assert calib["params"][0] == pytest.approx(fx_before, abs=1e-6)
+
+def test_intrinsics_guard_fixes_parameters_that_drift_on_a_degenerate_flight(tmp_path: Path):
+    # The 6-image synthetic flight is perfectly flat at constant altitude:
+    # the textbook case where focal length and principal point are not
+    # observable and drift (fx ~231 -> ~331 px, principal point ~90 px off
+    # a 320 px image) while reprojection stays tiny. The guard must catch
+    # that, re-run with those parameters fixed, and say so.
+    project, reconstruction_path = _aligned_project_and_reconstruction(tmp_path)
+    initial = next(iter(pycolmap.Reconstruction(str(reconstruction_path)).cameras.values()))
+
+    result = run_gnss_weighted_bundle_adjustment(project, reconstruction_path, tmp_path / "ba_out", BaConfig())
+
+    assert result.intrinsics_notes
+    calibration = next(iter(result.camera_calibration.values()))
+    final = pycolmap.Camera.create_from_model_name(1, calibration["model"], 1.0, initial.width, initial.height)
+    final.params = calibration["params"]
+    assert abs(final.mean_focal_length() / initial.mean_focal_length() - 1.0) <= DEFAULT_MAX_FOCAL_CHANGE_RATIO
+    assert abs(final.principal_point_x - initial.width / 2) / initial.width <= DEFAULT_MAX_PRINCIPAL_POINT_OFFSET_RATIO
+    assert abs(final.principal_point_y - initial.height / 2) / initial.height <= DEFAULT_MAX_PRINCIPAL_POINT_OFFSET_RATIO
+    assert calibration["initial_params"] == pytest.approx(list(initial.params))
+
+
+def test_fixed_intrinsics_option_keeps_the_phase2_lens(tmp_path: Path):
+    project, reconstruction_path = _aligned_project_and_reconstruction(tmp_path)
+    initial = next(iter(pycolmap.Reconstruction(str(reconstruction_path)).cameras.values()))
+
+    result = run_gnss_weighted_bundle_adjustment(
+        project, reconstruction_path, tmp_path / "ba_out", BaConfig.with_fixed_intrinsics()
+    )
+
+    assert result.intrinsics_refined == []
+    assert next(iter(result.camera_calibration.values()))["params"] == pytest.approx(list(initial.params), abs=1e-9)
+
+
+def test_rtk_float_image_is_weighted_by_its_own_deviation_and_left_out_of_rmse(tmp_path: Path):
+    # A real flight's first two images were RTK FLOAT (std 17-47 cm) and
+    # several meters off; weighted like the 2 cm FIX images they pulled
+    # the block. Simulate one: 5 m off, flagged FLOAT with a 5 m std-dev.
+    project, reconstruction_path = _aligned_project_and_reconstruction(tmp_path)
+    _shift_image_position(project, "SYNTH_0000.JPG", (5.0, 0.0, 0.0))
+    record = next(img for img in project.images if img.file_name == "SYNTH_0000.JPG")
+    record.rtk_flag = "34"
+    record.rtk_std_lon_m = record.rtk_std_lat_m = record.rtk_std_hgt_m = 5.0
+
+    result = run_gnss_weighted_bundle_adjustment(project, reconstruction_path, tmp_path / "ba_out", BaConfig())
+
+    float_residual = next(r for r in result.per_camera_residuals if r.image_name == "SYNTH_0000.JPG")
+    assert float_residual.xy_sigma_m == pytest.approx(5.0)
+    assert sum(v**2 for v in float_residual.residual_m) ** 0.5 > 2.0
+    assert result.images_excluded_from_rmse == ["SYNTH_0000.JPG"]
+    assert result.rmse_xy_cm < 10.0
+
+
+def test_prior_sigma_uses_the_configured_accuracy_as_a_floor():
+    accuracy = CameraAccuracy(xy_sigma_m=0.02, z_sigma_m=0.03)
+    fix = ImageRecord(path="a.jpg", file_name="a.jpg", rtk_std_lon_m=0.0045, rtk_std_lat_m=0.0049, rtk_std_hgt_m=0.011)
+    floating = ImageRecord(path="b.jpg", file_name="b.jpg", rtk_std_lon_m=0.17, rtk_std_lat_m=0.16, rtk_std_hgt_m=0.47)
+    no_metadata = ImageRecord(path="c.jpg", file_name="c.jpg")
+
+    assert _prior_sigmas(fix, accuracy, use_rtk_sigma=True) == (0.02, 0.03)
+    assert _prior_sigmas(floating, accuracy, use_rtk_sigma=True) == (0.17, 0.47)
+    assert _prior_sigmas(floating, accuracy, use_rtk_sigma=False) == (0.02, 0.03)
+    assert _prior_sigmas(no_metadata, accuracy, use_rtk_sigma=True) == (0.02, 0.03)
 
 
 def test_tight_sigma_pulls_solution_toward_biased_gnss(tmp_path: Path):
@@ -117,19 +180,6 @@ def test_tighter_sigma_produces_smaller_residual_than_looser_sigma(tmp_path: Pat
     assert tight_residual < loose_residual
 
 
-def test_refine_intrinsics_true_is_opt_in_and_documented_as_risky(tmp_path: Path):
-    project, reconstruction_path = _aligned_project_and_reconstruction(tmp_path)
-
-    result = run_gnss_weighted_bundle_adjustment(
-        project, reconstruction_path, tmp_path / "ba_out", BaConfig(refine_intrinsics=True)
-    )
-
-    # Not asserting a specific outcome here -- the point of this test is
-    # only that the opt-in path runs and returns a result; the default
-    # (refine_intrinsics=False) is what's asserted stable elsewhere.
-    assert result.num_images_adjusted > 0
-
-
 def test_raises_when_reconstruction_missing(tmp_path: Path):
     project = Project(name="p")
 
@@ -151,3 +201,18 @@ def test_raises_when_no_registered_images_have_matching_gnss(tmp_path: Path):
 def test_invalid_robust_loss_is_rejected():
     with pytest.raises(ValueError):
         BaConfig(robust_loss="not_a_real_loss")
+
+
+def test_raises_instead_of_silently_dropping_gnss_when_colmap_cannot_align(tmp_path: Path):
+    # When COLMAP's internal re-alignment to the GNSS positions fails it
+    # drops every GNSS prior and runs a reprojection-only adjustment,
+    # logging only a warning (once left a test flight 21 m off). GNSS
+    # positions scrambled by tens of meters, inconsistent with any
+    # similarity of the reconstruction, must fail loudly instead.
+    project, reconstruction_path = _aligned_project_and_reconstruction(tmp_path)
+    scramble = [(40.0, -30.0, 0.0), (-35.0, 45.0, 10.0), (60.0, 20.0, -15.0), (-50.0, -40.0, 5.0), (25.0, 70.0, 0.0), (-70.0, 10.0, -5.0)]
+    for record, offset in zip(sorted(project.images, key=lambda r: r.file_name), scramble):
+        _shift_image_position(project, record.file_name, offset)
+
+    with pytest.raises(BaError, match="did not use the GNSS"):
+        run_gnss_weighted_bundle_adjustment(project, reconstruction_path, tmp_path / "ba_out", BaConfig())

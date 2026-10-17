@@ -481,11 +481,10 @@ clássica de autocalibração fotogramétrica: para uma cena plana, `f` e a
 elevação (não observada) dos tie points são conjuntamente não-identificáveis,
 e um prior de posição de câmera não resolve isso porque não restringe a
 elevação da cena. Fixar os intrínsecos (mantendo os já refinados pela
-Fase 2) convergiu de forma limpa e estável. Por isso `BaConfig.refine_intrinsics`
-é `False` por padrão — só deve ser ligado quando o voo tem diversidade
-geométrica real (imagens oblíquas, altitude variável, GCPs), conforme a
-regra do briefing de não otimizar parâmetros sem evidência de que são
-observáveis.
+Fase 2) convergiu de forma limpa e estável. Por isso os intrínsecos ficaram
+fixos por padrão até o primeiro voo real mostrar o custo disso: ver seção
+27. Hoje são refinados por padrão, com travas contra exatamente essa
+degenerescência.
 
 - `core.report`: quando `project.ba` existe, preenche "Camera Locations"
   (RMSE X/Y/Z/XY/Total em cm) e "Camera Calibration" (parâmetros do
@@ -1470,6 +1469,133 @@ novos quanto para os RGBA antigos.
 - Os testes anteriores (cores conhecidas com erro médio < 8/255, tile
   gigante igual a tile de 8 px byte a byte) continuam passando com JPEG.
 
-**Ainda não validado em voo real**: precisa rodar `htrmapper ortho` de
-novo sobre a nuvem do referencial local (seção 25) e comparar no QGIS
-com o Pix4D.
+**Validado em voo real** (fazenda 20046, `ortho_v2`): visualmente aprovado
+pelo usuário, 53 MB (o JPEG só gasta bytes nos 32% de pixels válidos;
+blocos mascarados quase não ocupam espaço), transparência correta, 45 das
+56 câmeras usadas. Mas o mosaico ficou ~70 cm deslocado em relação ao do
+Pix4D — causa e correção na seção 27.
+
+## 27. Precisão absoluta: deslocamento de ~70 cm em relação ao Pix4D
+
+O mosaico do voo real ficou ~70 cm deslocado do Pix4D no mesmo ponto. O
+uso final (restituição de linha de cana para piloto automático de
+colhedora) exige precisão absoluta, então a cadeia inteira foi revisada,
+com diagnósticos rodados pelo usuário sobre a reconstrução real (scripts
+só de leitura, sem alterar o projeto).
+
+**Diagnóstico.** As câmeras com RTK FIX (desvio informado pelo receptor
+de ~5 mm) ficaram, depois do ajuste, a 30 cm (X) / 26 cm (Y) / 17 cm (Z)
+RMSE da própria posição GNSS, com máximo de 115 cm. Não era um
+deslocamento rígido (a média é zero por construção: a translação global
+não altera a reprojeção, então o ótimo centra o bloco no GNSS). O resíduo
+variava suavemente ao longo das faixas: o bloco estava entortado.
+
+Variantes do ajuste sobre a mesma reconstrução da Fase 2 (RMSE das fotos
+FIX, X / Y / Z):
+
+| Variante | RMSE | Máx. XY |
+|---|---|---|
+| A. como era (intrínsecos fixos, sigma único) | 30,0 / 26,3 / 17,5 cm | 114,8 cm |
+| B. + sigma por foto (desvio RTK) | 31,6 / 18,3 / 7,4 cm | 72,2 cm |
+| C. + distorção livre | 18,9 / 11,7 / 5,2 cm | 44,1 cm |
+| E. + ponto principal livre | 2,9 / 2,0 / 1,2 cm | 7,5 cm |
+| H. + focal livre (padrão novo) | 2,3 / 2,2 / 1,0 cm | 6,4 cm |
+| F. modelo FULL_OPENCV (k3..k6) | 2,6 / 2,3 / 1,1 cm | 6,4 cm |
+
+**Causa principal: ponto principal fixo no centro da imagem.** A Fase 2
+(COLMAP) não refina o ponto principal, e a Fase 3 mantinha a lente
+inteira fixa. O ajuste o colocou em (2667,4; 1959,6), a 27 / 18 px do
+centro. A 100 m de altura, 27 px de erro inclinam todo raio em
+27/3721 rad, movendo o chão ~73 cm, o que bate com o deslocamento visto.
+Faixas em sentidos opostos (rumo 245° e 65° neste voo) veem esse
+deslocamento em direções opostas, então o bloco entorta para conciliar e
+o mosaico sai no lugar errado. Não dá para separar, numa única altura de
+voo, ponto principal de um braço de alavanca horizontal antena-câmera
+(os dois movem o chão relativo ao GNSS de forma que gira com o rumo), mas
+para o mosaico só importa o efeito combinado, e é esse que o ajuste estima.
+
+Confirmações cruzadas:
+- Com a focal livre, ela convergiu para 3723,9 px. O `CalibratedFocalLength`
+  de fábrica gravado pela DJI no XMP dessa câmera é 3725,15 px (0,03% de
+  diferença).
+- Decomposto na direção de voo, o resíduo da variante H tem média de
+  +0,2 cm ao longo e +0,9 cm lateral (desvio ~2 cm). Isso descarta atraso
+  entre o disparo e o RTK, que apareceria como erro sistemático ao longo do
+  voo.
+- O modelo FULL_OPENCV (com k3, mas também os termos racionais k4..k6) não
+  ganhou nada sobre o OPENCV e deixou os coeficientes sem sentido físico
+  (k1 = −5,5, k2 = 11), sinal de superparametrização. Ficou de fora.
+
+**Correções implementadas na Fase 3** (`ba.weighted_bundle_adjustment`):
+1. Focal, ponto principal e distorção são refinados por padrão, com o GNSS
+   como referência. A degenerescência da seção 14 é real, mas aparece no
+   voo sintético de 6 fotos (focal indo de ~222 para ~199 px, ponto
+   principal 10% da imagem fora do centro). Por isso cada parâmetro tem
+   trava: se a focal mudar mais de 5% ou o ponto principal sair mais de 2%
+   do tamanho da imagem do centro (fisicamente implausível numa câmera de
+   drone real; o voo real ficou em 0,07% e 0,5%), o ajuste é refeito com
+   aquele parâmetro fixo e o motivo aparece em `intrinsics_notes`. CLI:
+   `--fix-intrinsics` volta ao comportamento antigo.
+2. Sigma por foto: a `CameraAccuracy` configurada vira um piso e, quando o
+   receptor informa um desvio maior (`RtkStdLon/Lat/Hgt`), vale o maior.
+   As duas primeiras fotos do voo real eram RTK FLOAT (desvio de 17–47 cm,
+   GNSS errado em 3–4 m) e, pesadas como FIX, puxavam o começo do bloco.
+3. O RMSE reportado considera só fotos RTK FIX (ou todas, se o voo não tem
+   flag RTK, como em PPK). O resíduo de uma foto FLOAT mede o GNSS ruim
+   dela, não o ajuste. As fotos excluídas são listadas.
+4. **Falha silenciosa do COLMAP.** Lendo o código-fonte do
+   `PosePriorBundleAdjuster` (COLMAP 4): antes de ajustar, ele realinha a
+   reconstrução aos priors com um RANSAC de Sim3 e, **se esse
+   alinhamento falha, descarta todos os priors GNSS** e roda um ajuste só
+   de reprojeção, avisando apenas no log. O limiar automático (~2,8 σ, uns
+   6 cm com σ = 2 cm) fazia isso acontecer de vez em quando no voo
+   sintético com uma foto ruim, deixando as câmeras a 21 m do lugar. Era
+   essa a causa dos testes "instáveis" do ajuste registrados antes: em 5
+   rodadas seguidas da suíte do ajuste, 0 falhas depois da correção. Agora
+   o limiar é 5 m (a entrada já vem alinhada ao mesmo GNSS pela Fase 2, com
+   desvios de até ~1,2 m no voo real; o passo só precisa rejeitar erros
+   grosseiros), e o número de resíduos do Ceres é conferido (3 por prior,
+   2 por observação). Se o COLMAP tiver descartado os priors, o ajuste
+   falha com erro claro em vez de seguir com um resultado inválido.
+5. Tolerâncias do solver mais apertadas (função 1e-10, até 500 iterações).
+   As variantes acima foram validadas assim; com a tolerância antiga
+   (1e-6) a variante C parou no limite de 200 iterações.
+
+**Correção na Fase 6: meio pixel.** O COLMAP põe a origem da imagem no
+canto do pixel superior esquerdo, então o centro desse pixel é (0,5; 0,5).
+Por isso o ponto principal padrão é largura/2 × altura/2. O ortomosaico
+amostrava essas coordenadas como índice de array, onde o centro do pixel
+é inteiro, e lia cada foto meio pixel deslocada (~1 cm no GSD nativo,
+numa direção que gira com o rumo de cada câmera). Teste com câmera do
+próprio pycolmap: o raio do eixo óptico tem que ler a média dos quatro
+pixels centrais. Ele falha sem a correção e passa com ela.
+
+**Sistema de coordenadas, conferido:**
+- EXIF GPS da DJI: minutos com 7 casas decimais (~0,2 mm), mesmo valor
+  do `GpsLatitude/GpsLongitude` do XMP. A leitura não perde precisão.
+- WGS84 → SIRGAS 2000 / UTM 23S pelo PROJ: transformação nula ("Inverse
+  of SIRGAS 2000 to WGS 84 (1)"). No ponto do voo, EPSG:31983 e EPSG:32723
+  (o CRS do Pix4D) diferem em 0,07 mm, então o CRS não explica a diferença
+  com o Pix4D. A altura passa inalterada.
+- Rodar o ajuste em coordenadas locais (só XY transladado, como a Fase 4)
+  deu resultado idêntico ao UTM absoluto. O próprio COLMAP normaliza a
+  reconstrução antes de ajustar. Já transladar também o Z para câmeras em
+  z ≈ 0 quebrou o ajuste sintético, mais um motivo para o referencial local
+  da Fase 4 manter Z = 0 de origem.
+- Pendente: a altitude da DJI (`AltitudeType = RtkAlt`) vem do referencial
+  das correções RTK, e não está confirmado se é elipsoidal ou ortométrica.
+  Isso não afeta XY do mosaico nem volumes, só o valor absoluto das cotas
+  do DEM. Basta comparar uma cota do DEM com a do Pix4D no mesmo ponto.
+
+**Não feito ainda (candidatos, por ordem de impacto esperado):**
+- DEM: hoje é interpolação linear da nuvem crua, sem filtro de ruído. O
+  ruído do DEM desloca pixels do mosaico perto da borda das fotos (erro de
+  cota × tangente do ângulo de visada).
+- Fase 2 extrai features em imagens reduzidas a 2000 px (de 5280). O
+  resíduo já caiu ao nível do ruído do RTK, então só vale testar em
+  resolução cheia se a verificação contra pontos de controle pedir.
+- Usar a calibração de fábrica da DJI (`DewarpData`: fx, cx/cy, k1, k2,
+  p1, p2, k3) como ponto de partida da Fase 2.
+- Prova de precisão absoluta: pontos de verificação medidos em campo com
+  rover RTK. Concordar com o Pix4D não prova precisão, porque ele usa o
+  mesmo GNSS.

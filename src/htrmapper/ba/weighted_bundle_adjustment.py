@@ -40,6 +40,41 @@ position within centimeters of the true, reprojection-consistent
 position. That is the expected behavior of a weighted observation, not a
 hard constraint, and is exactly what `tests/test_weighted_bundle_adjustment.py`
 checks against known ground truth.
+
+Camera intrinsics are refined here, with the GNSS positions as reference
+(ARCHITECTURE.md section 27). On the first real flight (56 Mavic 3M
+photos, RTK FIX at ~5 mm) keeping the lens fixed at the values Phase 2
+self-calibrated WITHOUT GNSS left the RTK FIX cameras 19-30 cm (max
+115 cm) away from their own GNSS positions. Freeing the principal point
+alone brought that to ~2-3 cm (max 7.5 cm). The reason: at 100 m flight
+height a principal point that is off by 27 px tilts every ray by
+27/3721 rad, i.e. moves the ground ~73 cm. Opposite flight lines see that
+shift in opposite directions, so the block bends to compromise and the
+orthomosaic lands ~70 cm away from where it belongs. Freeing focal length
+too converged to 3723.9 px, within 0.03% of DJI's own factory
+`CalibratedFocalLength` (3725.15 px) for that camera.
+
+The degeneracy that originally kept the lens fixed is real, but it shows
+up on small synthetic flights (6 images, perfectly flat, constant
+altitude), where focal length and principal point drift far away while
+reprojection error stays tiny. So each refined parameter is guarded: if
+focal length moves more than `max_focal_change_ratio` or the principal
+point ends up further than `max_principal_point_offset_ratio` of the
+image size from the image center (physically implausible for a real
+drone camera), the adjustment is re-run with that parameter fixed and
+the reason is reported in `BaResult.intrinsics_notes`. Nothing is
+silently dropped.
+
+Per-image GNSS weights: DJI RTK images carry their own position
+standard deviations (`RtkStdLon/Lat/Hgt`). The configured
+`CameraAccuracy` acts as a floor (it reflects error sources the receiver
+does not report, e.g. base coordinates), and an image whose receiver
+reports a larger deviation (an RTK FLOAT image, at 17-47 cm on that same
+flight) gets that larger deviation. Weighting those like FIX images
+pulled the start of the block by meters. GNSS residual RMSE is reported
+over RTK FIX images only (or all images when the flight carries no RTK
+flag, e.g. PPK), since a FLOAT image's residual measures its bad GNSS,
+not the adjustment.
 """
 
 from __future__ import annotations
@@ -65,6 +100,26 @@ _ROBUST_LOSS_TYPES = {
     "soft_l1": pycolmap.LossFunctionType.SOFT_L1,
 }
 
+# DJI XMP `RtkFlag`: 0 = no position, 16 = single point, 34 = RTK FLOAT,
+# 50 = RTK FIX.
+RTK_FIX_FLAG = "50"
+
+# Guards against the planar-flight self-calibration degeneracy (see module
+# docstring). Real values on the first real flight: focal moved 0.07%,
+# principal point 0.5% of the image size.
+DEFAULT_MAX_FOCAL_CHANGE_RATIO = 0.05
+DEFAULT_MAX_PRINCIPAL_POINT_OFFSET_RATIO = 0.02
+
+# COLMAP's pose-prior adjuster first re-aligns the reconstruction to the
+# priors with a RANSAC Sim3, and when that fails it DROPS every GNSS prior
+# and runs a plain reprojection-only adjustment (logging only a warning).
+# With COLMAP's automatic threshold (~2.8 sigma, i.e. ~6 cm at a 2 cm
+# sigma) that happened on a 6-image test flight with one bad GNSS fix and
+# left the cameras 21 m off. The input is already Sim3-aligned to the same
+# GNSS in Phase 2 (Phase 2 models deviated up to ~1.2 m on the real
+# flight), so this step only has to reject gross blunders: a few meters.
+PRIOR_ALIGNMENT_MAX_ERROR_M = 5.0
+
 
 class BaError(RuntimeError):
     """Raised when the bundle adjustment cannot even start (as opposed to
@@ -74,31 +129,28 @@ class BaError(RuntimeError):
 @dataclass
 class BaConfig:
     robust_loss: str = "cauchy"  # tie points can contain residual mismatches from Fase 2 matching
-    # Refining focal length/principal point/distortion here is OFF by
-    # default. Validated experimentally on a flat, nadir-only synthetic
-    # flight (constant altitude, no oblique views): letting the intrinsics
-    # self-calibrate simultaneously with a GNSS-weighted position prior
-    # diverged wildly (fx drifted from ~232px to ~580-710px) even though
-    # reprojection error stayed low (~0.06px) -- a textbook planar/nadir
-    # self-calibration degeneracy (focal length trades off against
-    # unconstrained tie-point elevation; a GNSS position prior pins the
-    # camera's absolute height but not the scene's, so it doesn't resolve
-    # this). Fixing intrinsics here and letting Phase 2's COLMAP-refined
-    # values stand converged cleanly in 4 iterations with identical
-    # reprojection error. Per the project's rule against optimizing
-    # parameters without evidence they're observable, this is the default;
-    # set `refine_intrinsics=True` only for flights with real geometric
-    # diversity (oblique images, varied altitude, GCPs) that actually
-    # constrain focal length independently of scene depth.
-    refine_intrinsics: bool = False
-    refine_principal_point: bool = False  # only consulted when refine_intrinsics=True
-    max_iterations: int = 200
-    function_tolerance: float = 1e-6
-    parameter_tolerance: float = 1e-8
+    refine_focal_length: bool = True
+    refine_principal_point: bool = True
+    refine_distortion: bool = True
+    use_per_image_rtk_sigma: bool = True
+    max_focal_change_ratio: float = DEFAULT_MAX_FOCAL_CHANGE_RATIO
+    max_principal_point_offset_ratio: float = DEFAULT_MAX_PRINCIPAL_POINT_OFFSET_RATIO
+    # Validated on the real flight with these tolerances (the looser
+    # 1e-6 function tolerance stopped well before the prior term settled).
+    max_iterations: int = 500
+    function_tolerance: float = 1e-10
+    gradient_tolerance: float = 1e-12
+    parameter_tolerance: float = 1e-12
 
     def __post_init__(self) -> None:
         if self.robust_loss not in _ROBUST_LOSS_TYPES:
             raise ValueError(f"unknown robust_loss {self.robust_loss!r}; choose from {sorted(_ROBUST_LOSS_TYPES)}")
+        if self.max_focal_change_ratio <= 0 or self.max_principal_point_offset_ratio <= 0:
+            raise ValueError("intrinsics guard ratios must be positive")
+
+    @classmethod
+    def with_fixed_intrinsics(cls, **kwargs) -> "BaConfig":
+        return cls(refine_focal_length=False, refine_principal_point=False, refine_distortion=False, **kwargs)
 
 
 @dataclass
@@ -107,8 +159,9 @@ class CameraGnssResidual:
     gnss_position_m: tuple[float, float, float]
     estimated_position_m: tuple[float, float, float]
     residual_m: tuple[float, float, float]  # estimated - gnss
-    xy_sigma_m: float
+    xy_sigma_m: float  # the sigma this image was actually weighted with
     z_sigma_m: float
+    rtk_flag: str | None = None
 
 
 @dataclass
@@ -128,6 +181,9 @@ class BaResult:
     converged: bool = False
     reconstruction_path: str = ""
     camera_calibration: dict[str, dict] = field(default_factory=dict)
+    intrinsics_refined: list[str] = field(default_factory=list)
+    intrinsics_notes: list[str] = field(default_factory=list)
+    images_excluded_from_rmse: list[str] = field(default_factory=list)
 
     def to_project_summary(self) -> "htrmapper.core.project.BaSummary":
         from htrmapper.core.project import BaSummary
@@ -147,6 +203,9 @@ class BaResult:
             converged=self.converged,
             reconstruction_path=self.reconstruction_path,
             camera_calibration=self.camera_calibration,
+            intrinsics_refined=self.intrinsics_refined,
+            intrinsics_notes=self.intrinsics_notes,
+            images_excluded_from_rmse=self.images_excluded_from_rmse,
         )
 
 
@@ -157,6 +216,123 @@ def _gnss_position_in_project_crs(record: ImageRecord, transformer: GeodeticTran
     if point.z is None:
         return None
     return (point.x, point.y, point.z)
+
+
+def _prior_sigmas(record: ImageRecord, accuracy: CameraAccuracy, use_rtk_sigma: bool) -> tuple[float, float]:
+    """(xy, z) sigma for one image: the configured accuracy, raised to the
+    receiver's own reported deviation when that is larger."""
+    xy_sigma, z_sigma = accuracy.xy_sigma_m, accuracy.z_sigma_m
+    if use_rtk_sigma:
+        horizontal = [s for s in (record.rtk_std_lon_m, record.rtk_std_lat_m) if s is not None]
+        if horizontal:
+            xy_sigma = max(xy_sigma, *horizontal)
+        if record.rtk_std_hgt_m is not None:
+            z_sigma = max(z_sigma, record.rtk_std_hgt_m)
+    return xy_sigma, z_sigma
+
+
+def _is_rtk_fix_or_unflagged(record: ImageRecord) -> bool:
+    return record.rtk_flag is None or str(record.rtk_flag).strip() == RTK_FIX_FLAG
+
+
+def _solve(
+    reconstruction_path: Path,
+    priors_by_name: dict[str, tuple[tuple[float, float, float], float, float]],
+    config: BaConfig,
+    refine_focal_length: bool,
+    refine_principal_point: bool,
+    refine_distortion: bool,
+):
+    """One pose-prior bundle adjustment run on a fresh copy of the Phase 2
+    reconstruction. Returns (reconstruction, summary, gnss_by_image_id)."""
+    reconstruction = pycolmap.Reconstruction(str(reconstruction_path))
+
+    ba_config = pycolmap.BundleAdjustmentConfig()
+    pose_priors: list[pycolmap.PosePrior] = []
+    gnss_by_image_id: dict[int, tuple[float, float, float]] = {}
+    for image_id in reconstruction.reg_image_ids():
+        ba_config.add_image(image_id)
+        image = reconstruction.image(image_id)
+        if image.name not in priors_by_name:
+            continue
+        position, xy_sigma, z_sigma = priors_by_name[image.name]
+        prior = pycolmap.PosePrior()
+        prior.position = np.array(position, dtype=np.float64)
+        prior.position_covariance = np.diag([xy_sigma**2, xy_sigma**2, z_sigma**2])
+        prior.coordinate_system = pycolmap.PosePriorCoordinateSystem.CARTESIAN
+        prior.corr_data_id = image.data_id
+        pose_priors.append(prior)
+        gnss_by_image_id[image_id] = position
+
+    if not pose_priors:
+        raise BaError(
+            "no registered image has a valid GNSS position matching the project's records; "
+            "cannot build any GNSS observation for the weighted adjustment"
+        )
+
+    options = pycolmap.BundleAdjustmentOptions()
+    options.ceres.loss_function_type = _ROBUST_LOSS_TYPES[config.robust_loss]
+    options.ceres.solver_options.max_num_iterations = config.max_iterations
+    options.ceres.solver_options.function_tolerance = config.function_tolerance
+    options.ceres.solver_options.gradient_tolerance = config.gradient_tolerance
+    options.ceres.solver_options.parameter_tolerance = config.parameter_tolerance
+    options.refine_focal_length = refine_focal_length
+    options.refine_principal_point = refine_principal_point
+    options.refine_extra_params = refine_distortion
+    if not (refine_focal_length or refine_principal_point or refine_distortion):
+        for camera_id in reconstruction.cameras:
+            ba_config.set_constant_cam_intrinsics(camera_id)
+
+    prior_options = pycolmap.PosePriorBundleAdjustmentOptions()
+    alignment_ransac = prior_options.alignment_ransac
+    alignment_ransac.max_error = PRIOR_ALIGNMENT_MAX_ERROR_M
+    prior_options.alignment_ransac = alignment_ransac
+
+    adjuster = pycolmap.create_pose_prior_bundle_adjuster(
+        options, prior_options, ba_config, pose_priors, reconstruction
+    )
+    summary = adjuster.solve()
+
+    # Each prior adds 3 residuals and each observation 2; anything else
+    # means COLMAP silently dropped the priors (see PRIOR_ALIGNMENT_MAX_ERROR_M).
+    prior_residuals = summary.num_residuals - 2 * reconstruction.compute_num_observations()
+    if prior_residuals != 3 * len(pose_priors):
+        raise BaError(
+            f"COLMAP did not use the GNSS observations ({prior_residuals // 3} of {len(pose_priors)} in the "
+            "adjustment): its alignment of the reconstruction to the GNSS positions failed. The Fase 2 "
+            "reconstruction is probably not consistent with the GNSS positions (check the alignment and the "
+            "image positions)."
+        )
+    return reconstruction, summary, gnss_by_image_id
+
+
+def _implausible_intrinsics(
+    initial_cameras: dict[int, "pycolmap.Camera"], reconstruction: "pycolmap.Reconstruction", config: BaConfig
+) -> tuple[bool, bool, list[str]]:
+    """(focal_implausible, principal_point_implausible, notes)."""
+    focal_bad = principal_point_bad = False
+    notes: list[str] = []
+    for camera_id, camera in reconstruction.cameras.items():
+        initial = initial_cameras[camera_id]
+        focal_change = abs(camera.mean_focal_length() / initial.mean_focal_length() - 1.0)
+        if focal_change > config.max_focal_change_ratio:
+            focal_bad = True
+            notes.append(
+                f"camera {camera_id}: focal length moved {focal_change:.1%} "
+                f"({initial.mean_focal_length():.1f} -> {camera.mean_focal_length():.1f} px), above the "
+                f"{config.max_focal_change_ratio:.0%} limit; re-adjusted with focal length fixed"
+            )
+        offset_x = abs(camera.principal_point_x - camera.width / 2.0) / camera.width
+        offset_y = abs(camera.principal_point_y - camera.height / 2.0) / camera.height
+        if max(offset_x, offset_y) > config.max_principal_point_offset_ratio:
+            principal_point_bad = True
+            notes.append(
+                f"camera {camera_id}: principal point ({camera.principal_point_x:.1f}, "
+                f"{camera.principal_point_y:.1f}) is {max(offset_x, offset_y):.1%} of the image size from the "
+                f"center, above the {config.max_principal_point_offset_ratio:.0%} limit; re-adjusted with "
+                "principal point fixed"
+            )
+    return focal_bad, principal_point_bad, notes
 
 
 def run_gnss_weighted_bundle_adjustment(
@@ -178,102 +354,95 @@ def run_gnss_weighted_bundle_adjustment(
         raise BaError(f"reconstruction not found at {reconstruction_path}")
 
     try:
-        reconstruction = pycolmap.Reconstruction(str(reconstruction_path))
+        initial_reconstruction = pycolmap.Reconstruction(str(reconstruction_path))
     except Exception as exc:  # noqa: BLE001 -- pycolmap raises varied native exceptions
         raise BaError(f"failed to load reconstruction from {reconstruction_path}: {exc}") from exc
 
-    registered_ids = list(reconstruction.reg_image_ids())
+    registered_ids = list(initial_reconstruction.reg_image_ids())
     if not registered_ids:
         raise BaError("reconstruction has no registered images; nothing to adjust")
+    initial_cameras = dict(initial_reconstruction.cameras.items())
 
     accuracy: CameraAccuracy = project.gnss_accuracy.accuracy
     transformer = GeodeticTransformer(wgs84(), CoordinateReferenceSystem(project.crs.project_epsg))
     records_by_name = {Path(img.path).name: img for img in project.images}
 
-    covariance = np.diag([accuracy.xy_sigma_m**2, accuracy.xy_sigma_m**2, accuracy.z_sigma_m**2])
-
-    ba_config = pycolmap.BundleAdjustmentConfig()
-    pose_priors: list[pycolmap.PosePrior] = []
-    gnss_positions_before: dict[int, tuple[float, float, float]] = {}
-    camera_ids_seen: set[int] = set()
-
+    priors_by_name: dict[str, tuple[tuple[float, float, float], float, float]] = {}
     for image_id in registered_ids:
-        ba_config.add_image(image_id)
-        image = reconstruction.image(image_id)
-        camera_ids_seen.add(image.camera_id)
-        record = records_by_name.get(image.name)
+        name = initial_reconstruction.image(image_id).name
+        record = records_by_name.get(name)
         if record is None:
             continue
         gnss_position = _gnss_position_in_project_crs(record, transformer)
         if gnss_position is None:
             continue
+        priors_by_name[name] = (gnss_position, *_prior_sigmas(record, accuracy, config.use_per_image_rtk_sigma))
 
-        prior = pycolmap.PosePrior()
-        prior.position = np.array(gnss_position, dtype=np.float64)
-        prior.position_covariance = covariance
-        prior.coordinate_system = pycolmap.PosePriorCoordinateSystem.CARTESIAN
-        prior.corr_data_id = image.data_id
-        pose_priors.append(prior)
-        gnss_positions_before[image_id] = gnss_position
-
-    if not pose_priors:
-        raise BaError(
-            "no registered image has a valid GNSS position matching the project's records; "
-            "cannot build any GNSS observation for the weighted adjustment"
+    refine_focal = config.refine_focal_length
+    refine_principal_point = config.refine_principal_point
+    intrinsics_notes: list[str] = []
+    reconstruction, summary, gnss_by_image_id = _solve(
+        reconstruction_path, priors_by_name, config, refine_focal, refine_principal_point, config.refine_distortion
+    )
+    # Fixing one parameter can push the other out of bounds, hence the loop;
+    # at most two re-runs, since each one fixes at least one more parameter.
+    while refine_focal or refine_principal_point:
+        focal_bad, principal_point_bad, notes = _implausible_intrinsics(initial_cameras, reconstruction, config)
+        focal_bad = focal_bad and refine_focal
+        principal_point_bad = principal_point_bad and refine_principal_point
+        if not (focal_bad or principal_point_bad):
+            break
+        intrinsics_notes.extend(notes)
+        for note in notes:
+            logger.warning(note)
+        refine_focal = refine_focal and not focal_bad
+        refine_principal_point = refine_principal_point and not principal_point_bad
+        reconstruction, summary, gnss_by_image_id = _solve(
+            reconstruction_path, priors_by_name, config, refine_focal, refine_principal_point, config.refine_distortion
         )
 
-    options = pycolmap.BundleAdjustmentOptions()
-    options.ceres.loss_function_type = _ROBUST_LOSS_TYPES[config.robust_loss]
-    options.ceres.solver_options.max_num_iterations = config.max_iterations
-    options.ceres.solver_options.function_tolerance = config.function_tolerance
-    options.ceres.solver_options.parameter_tolerance = config.parameter_tolerance
-
-    if config.refine_intrinsics:
-        options.refine_principal_point = config.refine_principal_point
-    else:
-        options.refine_focal_length = False
-        options.refine_principal_point = False
-        options.refine_extra_params = False
-        for camera_id in camera_ids_seen:
-            ba_config.set_constant_cam_intrinsics(camera_id)
-
-    prior_options = pycolmap.PosePriorBundleAdjustmentOptions()
-
-    adjuster = pycolmap.create_pose_prior_bundle_adjuster(
-        options, prior_options, ba_config, pose_priors, reconstruction
-    )
-    summary = adjuster.solve()
+    intrinsics_refined = [
+        name
+        for name, enabled in (
+            ("focal_length", refine_focal),
+            ("principal_point", refine_principal_point),
+            ("distortion", config.refine_distortion),
+        )
+        if enabled
+    ]
 
     residuals: list[CameraGnssResidual] = []
-    squared_errors_x, squared_errors_y, squared_errors_z, squared_errors_total = [], [], [], []
-    for image_id, gnss_position in gnss_positions_before.items():
+    for image_id, gnss_position in gnss_by_image_id.items():
         image = reconstruction.image(image_id)
+        record = records_by_name[image.name]
+        _, xy_sigma, z_sigma = priors_by_name[image.name]
         estimated = tuple(float(v) for v in image.projection_center())
-        residual = tuple(estimated[i] - gnss_position[i] for i in range(3))
         residuals.append(
             CameraGnssResidual(
                 image_name=image.name,
                 gnss_position_m=gnss_position,
                 estimated_position_m=estimated,
-                residual_m=residual,
-                xy_sigma_m=accuracy.xy_sigma_m,
-                z_sigma_m=accuracy.z_sigma_m,
+                residual_m=tuple(estimated[i] - gnss_position[i] for i in range(3)),
+                xy_sigma_m=xy_sigma,
+                z_sigma_m=z_sigma,
+                rtk_flag=record.rtk_flag,
             )
         )
-        squared_errors_x.append(residual[0] ** 2)
-        squared_errors_y.append(residual[1] ** 2)
-        squared_errors_z.append(residual[2] ** 2)
-        squared_errors_total.append(residual[0] ** 2 + residual[1] ** 2 + residual[2] ** 2)
+
+    rmse_set = [r for r in residuals if _is_rtk_fix_or_unflagged(records_by_name[r.image_name])] or residuals
+    rmse_names = {r.image_name for r in rmse_set}
+    images_excluded_from_rmse = sorted(r.image_name for r in residuals if r.image_name not in rmse_names)
 
     def rmse_cm(squared_errors: list[float]) -> float:
         return sqrt(sum(squared_errors) / len(squared_errors)) * 100.0
 
-    rmse_x_cm = rmse_cm(squared_errors_x)
-    rmse_y_cm = rmse_cm(squared_errors_y)
-    rmse_z_cm = rmse_cm(squared_errors_z)
+    rmse_x_cm = rmse_cm([r.residual_m[0] ** 2 for r in rmse_set])
+    rmse_y_cm = rmse_cm([r.residual_m[1] ** 2 for r in rmse_set])
+    rmse_z_cm = rmse_cm([r.residual_m[2] ** 2 for r in rmse_set])
     rmse_xy_cm = sqrt(rmse_x_cm**2 + rmse_y_cm**2)
-    rmse_total_cm = rmse_cm(squared_errors_total)
-    max_error_cm = sqrt(max(squared_errors_total)) * 100.0
+    squared_totals = [sum(v**2 for v in r.residual_m) for r in rmse_set]
+    rmse_total_cm = rmse_cm(squared_totals)
+    max_error_cm = sqrt(max(squared_totals)) * 100.0
 
     camera_calibration: dict[str, dict] = {}
     for camera_id, camera in reconstruction.cameras.items():
@@ -281,6 +450,7 @@ def run_gnss_weighted_bundle_adjustment(
             "model": camera.model_name,
             "params_info": camera.params_info,
             "params": [float(p) for p in camera.params],
+            "initial_params": [float(p) for p in initial_cameras[camera_id].params],
         }
 
     output_path = Path(output_path)
@@ -289,7 +459,7 @@ def run_gnss_weighted_bundle_adjustment(
 
     return BaResult(
         num_images_adjusted=len(registered_ids),
-        num_images_with_gnss_prior=len(pose_priors),
+        num_images_with_gnss_prior=len(gnss_by_image_id),
         per_camera_residuals=residuals,
         rmse_x_cm=rmse_x_cm,
         rmse_y_cm=rmse_y_cm,
@@ -303,4 +473,7 @@ def run_gnss_weighted_bundle_adjustment(
         converged=summary.is_solution_usable(),
         reconstruction_path=str(output_path),
         camera_calibration=camera_calibration,
+        intrinsics_refined=intrinsics_refined,
+        intrinsics_notes=intrinsics_notes,
+        images_excluded_from_rmse=images_excluded_from_rmse,
     )

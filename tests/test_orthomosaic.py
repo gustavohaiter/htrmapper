@@ -8,7 +8,15 @@ import rasterio
 from PIL import Image as PILImage
 from rasterio.transform import from_origin
 
-from htrmapper.ortho.orthomosaic import OrthoConfig, OrthoError, run_orthomosaic_generation
+import pycolmap
+
+from htrmapper.ortho.orthomosaic import (
+    OrthoConfig,
+    OrthoError,
+    _array_index_coords,
+    _bilinear_sample,
+    run_orthomosaic_generation,
+)
 from tests.synthetic_scene import (
     TEXTURE_PX_PER_METER,
     SyntheticFlightSpec,
@@ -322,3 +330,28 @@ def test_output_is_tiled_jpeg_with_internal_mask_and_overviews(tmp_path: Path):
         assert src.overviews(1)
         mask = src.read_masks(1)
     assert int((mask > 0).sum()) == result.num_valid_pixels
+
+
+def test_sampling_follows_colmap_pixel_convention():
+    # COLMAP's image origin is the top-left CORNER, so its default
+    # principal point (width/2, height/2) on an even-sized image sits on
+    # the corner shared by the four central pixels. A ray along the
+    # optical axis must therefore read the average of those four pixels,
+    # not pixel (width/2, height/2) itself -- sampling COLMAP coordinates
+    # as array indices reads every photo half a pixel off.
+    width, height = 40, 30
+    camera = pycolmap.Camera.create_from_model_name(1, "PINHOLE", 50.0, width, height)
+    columns = np.arange(width, dtype=np.float64)
+    rows = np.arange(height, dtype=np.float64)
+    image = np.zeros((height, width, 3), dtype=np.uint8)
+    image[..., 0] = (columns * 5)[None, :]
+    image[..., 1] = (rows * 7)[:, None]
+
+    pixel = camera.img_from_cam(np.array([[0.0, 0.0, 1.0]]))
+    assert pixel[0] == pytest.approx([width / 2, height / 2])
+
+    u, v = _array_index_coords(pixel)
+    color = _bilinear_sample(image, u, v)[0]
+
+    assert color[0] == pytest.approx(5 * (width / 2 - 0.5))
+    assert color[1] == pytest.approx(7 * (height / 2 - 0.5))

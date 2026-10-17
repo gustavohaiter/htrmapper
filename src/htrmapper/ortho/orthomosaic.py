@@ -165,6 +165,20 @@ def _load_dem_grid(dem_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, 
     return world_x, world_y, elevation, transform, crs_wkt
 
 
+def _array_index_coords(pixel_coords: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """COLMAP image coordinates -> (column, row) array-index coordinates.
+
+    COLMAP puts the image origin at the top-left CORNER of the top-left
+    pixel, so that pixel's center is (0.5, 0.5) (which is why its default
+    principal point is width/2, height/2). An image array indexes pixel
+    centers at integers. Sampling with COLMAP's coordinates directly
+    reads every photo half a pixel off (~1 cm at native GSD), in a
+    direction that turns with each camera's heading, so overlapping
+    photos disagree at the seams (ARCHITECTURE.md section 27).
+    """
+    return pixel_coords[:, 0] - 0.5, pixel_coords[:, 1] - 0.5
+
+
 def _bilinear_sample(image: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
     """Bilinear sampling of an (H, W, 3) uint8 image at fractional pixel
     coordinates (u=column, v=row), all assumed inside the image."""
@@ -270,8 +284,7 @@ def _camera_footprint_bbox(
 
     camera = image.camera
     cam_points = image.cam_from_world() * world_points
-    pixel_coords = camera.img_from_cam(cam_points, check_cheirality=True)
-    u, v = pixel_coords[:, 0], pixel_coords[:, 1]
+    u, v = _array_index_coords(camera.img_from_cam(cam_points, check_cheirality=True))
     valid = ~np.isnan(u) & (u >= 0) & (u <= camera.width - 1) & (v >= 0) & (v <= camera.height - 1)
     if not np.any(valid):
         return None
@@ -481,9 +494,7 @@ def run_orthomosaic_generation(
 
                     camera = entry["camera"]
                     cam_points = entry["image"].cam_from_world() * world_points
-                    pixel_coords = camera.img_from_cam(cam_points, check_cheirality=True)
-                    u = pixel_coords[:, 0]
-                    v = pixel_coords[:, 1]
+                    u, v = _array_index_coords(camera.img_from_cam(cam_points, check_cheirality=True))
                     visible = (
                         ~np.isnan(u)
                         & (u >= 0)
