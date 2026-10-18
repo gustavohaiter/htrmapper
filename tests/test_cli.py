@@ -36,11 +36,12 @@ def _write_synthetic_point_cloud(path: Path, num_points: int = 200) -> None:
     las.write(path)
 
 
-def test_dem_command_honors_a_configured_export_epsg(tmp_path: Path):
-    # Regression test for a real bug: `htrmapper dem` used to pass
-    # `project.crs.project_epsg` straight to `run_dem_generation`,
-    # ignoring `export_epsg` entirely -- a user who configured a distinct
-    # export CRS would silently get their project's working CRS instead.
+def test_dem_is_written_in_the_crs_its_coordinates_are_in_even_with_an_export_crs(tmp_path: Path, capsys):
+    # The DEM is computed from project-CRS (UTM, meters) points and nothing
+    # reprojects it. An earlier fix labeled it with the configured export
+    # CRS instead (EPSG:4674 here, geographic degrees), which put UTM
+    # coordinates into a degrees CRS: the raster lands in the wrong place.
+    # It must declare the project CRS and say that reprojection is not done.
     las_path = tmp_path / "cloud.las"
     _write_synthetic_point_cloud(las_path)
 
@@ -57,4 +58,5 @@ def test_dem_command_honors_a_configured_export_epsg(tmp_path: Path):
 
     assert exit_code == 0
     with rasterio.open(output_path) as src:
-        assert src.crs.to_epsg() == 4674
+        assert src.crs.to_epsg() == 31983
+    assert "reprojection is not implemented" in capsys.readouterr().err

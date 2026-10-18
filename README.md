@@ -82,15 +82,19 @@ Implementado nesta fase:
   Confirmado no mesmo voo real: 2,58 milhões de pontos contra 158 mil,
   no mesmo tempo; ver `ARCHITECTURE.md` seções 15, 24 e 25.
 - **Fase 5** (DEM/DSM a partir da nuvem densa, via GDAL/`rasterio` +
-  `scipy.interpolate`): filtro de outliers robusto (mediana + MAD, não
-  um corte de percentil fixo — um bug real pego pelo próprio teste, ver
-  `ARCHITECTURE.md`), resolução automática (2,5x o espaçamento médio de
-  pontos) ou definida pelo usuário, interpolação linear + preenchimento
-  de buracos por nearest-neighbor, GeoTIFF com CRS/geotransform/NoData
-  corretos. Validado contra uma superfície sintética de verdade
-  conhecida: erro médio < 15cm, erro máximo < 50cm comparado ao valor
-  real da função de terreno, não apenas "rodou sem erro". CLI:
-  `htrmapper dem`. GUI: botão "Gerar DEM…". Ver `ARCHITECTURE.md` seção 16.
+  `scipy`): filtro global de erros grosseiros (mediana + MAD), mediana
+  dos pontos por célula, filtro de picos local (como o "noise filtering"
+  do Pix4D, com proteção por componente conectado para não apagar
+  valetas, carreadores ou terraços), buracos preenchidos só onde a
+  superfície foi reconstruída em volta (como o modo padrão do Metashape)
+  e NoData fora dela, grade alinhada a múltiplos da resolução, GeoTIFF
+  em blocos com compressão. Resolução automática de 2x o espaçamento
+  médio dos pontos ou definida pelo usuário. Num banco de testes com
+  superfície conhecida (talhão com linhas de cana, valeta, buraco e
+  pontos espúrios): erro RMS de 10 para 5 cm, picos acima de 30 cm de
+  1,25% para 0,08% das células, sem os 4.600 m² inventados fora da área
+  com dados, 20x mais rápido. CLI: `htrmapper dem`. GUI: botão "Gerar
+  DEM…". Ver `ARCHITECTURE.md` seções 16 e 28.
 - **Fase 6** (ortomosaico — **2.5D**, não true-ortho 3D completo, ver
   `ARCHITECTURE.md`): reprojeta as imagens não-distorcidas da Fase 4 no
   plano do DEM da Fase 5, reaproveitando o próprio modelo de câmera do

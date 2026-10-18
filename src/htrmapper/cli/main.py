@@ -209,6 +209,7 @@ def _cmd_dense(args: argparse.Namespace) -> int:
         filter_min_ncc=args.filter_min_ncc,
     )
 
+    _warn_if_export_crs_differs(project)
     print(f"Dense reconstruction for project: {project.name}")
     print(f"Reconstruction: {reconstruction_path}")
     print(f"Quality: {config.quality}")
@@ -239,6 +240,17 @@ def _cmd_dense(args: argparse.Namespace) -> int:
     return 0
 
 
+def _warn_if_export_crs_differs(project: Project) -> None:
+    crs = project.crs
+    if crs.effective_export_epsg != crs.project_epsg:
+        print(
+            f"warning: export CRS EPSG:{crs.effective_export_epsg} is configured, but reprojection is not "
+            f"implemented yet; this product is written in the project CRS EPSG:{crs.project_epsg}, which is "
+            "the CRS its coordinates are actually in.",
+            file=sys.stderr,
+        )
+
+
 def _cmd_dem(args: argparse.Namespace) -> int:
     project_path = Path(args.project)
     if not project_path.is_file():
@@ -251,6 +263,7 @@ def _cmd_dem(args: argparse.Namespace) -> int:
         return 1
 
     config = DemConfig(resolution_m=args.resolution, filter_outliers=not args.no_filter)
+    _warn_if_export_crs_differs(project)
 
     print(f"DEM generation for project: {project.name}")
     print(f"Point cloud: {project.mvs.point_cloud_las_path}")
@@ -258,7 +271,7 @@ def _cmd_dem(args: argparse.Namespace) -> int:
 
     try:
         result = run_dem_generation(
-            Path(project.mvs.point_cloud_las_path), project.crs.effective_export_epsg, Path(args.output), config
+            Path(project.mvs.point_cloud_las_path), project.crs.project_epsg, Path(args.output), config
         )
     except DemError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -269,6 +282,10 @@ def _cmd_dem(args: argparse.Namespace) -> int:
     print(f"Elevation range: [{result.min_elevation_m:.2f}, {result.max_elevation_m:.2f}] m")
     print(f"Points used: {result.num_points_used} ({result.num_points_filtered_as_outliers} filtered as outliers)")
     print(f"Point density: {result.point_density_per_m2:.2f} points/m²")
+    print(
+        f"Cells: {result.num_cells_despiked} spikes removed, {result.num_cells_interpolated} interpolated, "
+        f"{result.nodata_fraction:.1%} NoData (outside the reconstructed area)"
+    )
     print(f"GeoTIFF: {result.raster_path}")
 
     project.dem = DemSummary(
@@ -282,6 +299,9 @@ def _cmd_dem(args: argparse.Namespace) -> int:
         num_points_used=result.num_points_used,
         num_points_filtered_as_outliers=result.num_points_filtered_as_outliers,
         point_density_per_m2=result.point_density_per_m2,
+        num_cells_despiked=result.num_cells_despiked,
+        num_cells_interpolated=result.num_cells_interpolated,
+        nodata_fraction=result.nodata_fraction,
     )
     project.save(project_path)
     print(f"\nProject updated: {project_path}")

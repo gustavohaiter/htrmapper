@@ -242,7 +242,7 @@ def run_dense_reconstruction(
     local_sparse_path.mkdir(parents=True, exist_ok=True)
     _translated(reconstruction, -local_origin).write(local_sparse_path)
     (workdir / "local_origin.json").write_text(
-        json.dumps({"local_origin_m": local_origin.tolist(), "project_epsg": project.crs.effective_export_epsg}),
+        json.dumps({"local_origin_m": local_origin.tolist(), "project_epsg": project.crs.project_epsg}),
         encoding="utf-8",
     )
     logger.info("dense reconstruction runs in a local frame; origin (project CRS) = %s", local_origin.tolist())
@@ -303,7 +303,9 @@ def run_dense_reconstruction(
 
     las_path = workdir / "dense_point_cloud.las"
     _report("Exportando nuvem de pontos (LAS)")
-    _export_to_las(dense_reconstruction, project.crs.effective_export_epsg, las_path, offset=local_origin)
+    # The reconstruction lives in the project CRS and nothing here reprojects
+    # it, so that is the CRS the LAS must declare (ARCHITECTURE.md section 28).
+    _export_to_las(dense_reconstruction, project.crs.project_epsg, las_path, offset=local_origin)
 
     return MvsResult(
         num_points=len(dense_reconstruction.points3D),

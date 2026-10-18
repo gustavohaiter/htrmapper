@@ -76,6 +76,7 @@ from PIL import Image as PILImage
 from rasterio.enums import Resampling
 from rasterio.transform import from_origin
 from rasterio.windows import Window
+from scipy import ndimage
 from scipy.interpolate import RegularGridInterpolator
 
 # Processing tile side, in output pixels. Bounds per-tile memory (the
@@ -161,6 +162,16 @@ def _load_dem_grid(dem_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, 
 
     if nodata is not None:
         elevation = np.where(elevation == nodata, np.nan, elevation)
+
+    # The DEM is NoData where no surface was reconstructed (typically the
+    # outer edge, seen by a single photo). Cameras may still see that ground
+    # within the view-angle limit, so the mosaic extends the nearest known
+    # elevation there instead of losing the strip; the DEM product itself
+    # stays honest (ARCHITECTURE.md section 28).
+    missing = np.isnan(elevation)
+    if missing.any() and not missing.all():
+        nearest = ndimage.distance_transform_edt(missing, return_distances=False, return_indices=True)
+        elevation = elevation[tuple(nearest)]
 
     return world_x, world_y, elevation, transform, crs_wkt
 

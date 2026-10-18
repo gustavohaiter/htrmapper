@@ -125,12 +125,16 @@ class ProjectCrsConfig:
 
     @property
     def effective_export_epsg(self) -> int:
-        """The EPSG code every exported raster/point cloud (LAS, DEM
-        GeoTIFF) should actually be written in -- `export_epsg` when the
-        user set one, `project_epsg` otherwise. Every export call site
-        must go through this property, never read `project_epsg` directly
-        for that purpose, or a user-configured `export_epsg` silently has
-        no effect."""
+        """The CRS the user wants final products delivered in --
+        `export_epsg` when set, `project_epsg` otherwise.
+
+        Not the CRS the pipeline writes its files in: the dense cloud, DEM
+        and orthomosaic all carry project-CRS coordinates (nothing
+        reprojects them), so they must declare `project_epsg`. Labeling
+        UTM meters with a different EPSG (e.g. the geographic EPSG:4674)
+        would put every product in the wrong place without changing a
+        single coordinate (ARCHITECTURE.md section 28). Reprojection to
+        the export CRS is a separate, not yet implemented step."""
         return self.export_epsg if self.export_epsg is not None else self.project_epsg
 
     def to_dict(self) -> dict:
@@ -257,6 +261,9 @@ class DemSummary:
     num_points_used: int = 0
     num_points_filtered_as_outliers: int = 0
     point_density_per_m2: float = 0.0
+    num_cells_despiked: int = 0
+    num_cells_interpolated: int = 0
+    nodata_fraction: float = 0.0
     ran_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
     def to_dict(self) -> dict:

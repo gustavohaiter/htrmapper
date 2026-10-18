@@ -355,3 +355,26 @@ def test_sampling_follows_colmap_pixel_convention():
 
     assert color[0] == pytest.approx(5 * (width / 2 - 0.5))
     assert color[1] == pytest.approx(7 * (height / 2 - 0.5))
+
+
+def test_dem_nodata_cells_seen_by_cameras_still_get_mosaic_pixels(tmp_path: Path):
+    # The DEM is NoData outside the reconstructed surface (typically the
+    # outer edge, seen by one photo). Cameras still see that ground, so the
+    # mosaic extends the nearest elevation there instead of losing it.
+    spec, terrain, images_dir, reconstruction_path, dem_path = _setup_ground_truth_scene(tmp_path)
+    full = run_orthomosaic_generation(reconstruction_path, images_dir, dem_path, tmp_path / "full.tif")
+
+    with rasterio.open(dem_path) as src:
+        profile = src.profile
+        elevation = src.read(1)
+    # A NoData band across the middle of the covered area, where every
+    # camera footprint overlaps it.
+    rows, _ = elevation.shape
+    elevation[rows // 2 - 3 : rows // 2 + 3, :] = -9999
+    holed_dem = tmp_path / "dem_with_nodata.tif"
+    with rasterio.open(holed_dem, "w", **profile) as dst:
+        dst.write(elevation, 1)
+
+    holed = run_orthomosaic_generation(reconstruction_path, images_dir, holed_dem, tmp_path / "holed.tif")
+
+    assert holed.num_valid_pixels == full.num_valid_pixels

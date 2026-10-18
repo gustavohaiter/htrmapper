@@ -606,18 +606,18 @@ triangulação/rasterização próprio.
      percentil mede posição no ranking, não a distância real à massa de
      dados. Isso foi um bug real pego pelo próprio teste (ver abaixo),
      corrigido antes de chegar a produção.
-  2. **Resolução automática**: `espaçamento_médio × 2,5`, onde
+  2. **Resolução automática** (hoje 2,0x, ver seção 28): `espaçamento_médio × 2,5`, onde
      `espaçamento_médio = sqrt(área / número_de_pontos)`. Heurística
      documentada como tal (não uma lei física): uma célula do DEM precisa
      de suporte de múltiplos pontos da nuvem densa para interpolar de
      forma confiável, e a prática comum em fotogrametria aérea recomenda
      resolução de DEM/ortomosaico de 2-4x o espaçamento de pontos/GSD.
      Sempre sobrescrevível pelo usuário (`DemConfig.resolution_m`).
-  3. **Interpolação + preenchimento de buracos**: `scipy.interpolate.griddata`
-     linear dentro do hull convexo dos pontos, depois nearest-neighbor
-     para preencher o que sobrar (fora do hull, ou buracos que a
-     interpolação linear não alcança) — nunca extrapolação linear sem
-     controle.
+  3. **Interpolação + preenchimento de buracos**: substituídos na seção
+     28 (mediana por célula, filtro de picos, preenchimento só dentro da
+     área reconstruída). O método original abaixo (interpolação linear
+     dos pontos crus + nearest-neighbor até o retângulo envolvente)
+     deixava picos de metros e inventava terreno fora dos dados.
   4. Escrita do GeoTIFF via `rasterio`: CRS do projeto (nunca hardcoded),
      geotransform norte-para-cima correto, NoData explícito (-9999),
      Float32, escala compatível com a precisão centimétrica do resto do
@@ -1599,3 +1599,109 @@ pixels centrais. Ele falha sem a correção e passa com ela.
 - Prova de precisão absoluta: pontos de verificação medidos em campo com
   rover RTK. Concordar com o Pix4D não prova precisão, porque ele usa o
   mesmo GNSS.
+
+**Confirmado em voo real** (fazenda 20046, `ortho_v3`): o ajuste rodou com
+focal, ponto principal e distorção livres, sem nenhuma trava acionada;
+RMSE das câmeras RTK FIX de 2,3 / 2,2 / 1,0 cm (máx. 6,4 cm), com as duas
+fotos FLOAT fora do RMSE. Comparado no QGIS, o mosaico ficou praticamente
+idêntico ao do Pix4D; o deslocamento de ~70 cm sumiu.
+
+## 28. Revisão contra Metashape e Pix4D; DEM refeito; bug de CRS
+
+Com a precisão confirmada (seção 27), revisamos o pipeline contra o que
+Agisoft e Pix4D documentam, para achar diferenças que valem
+implementação. Fontes primárias: o manual oficial do Metashape
+Professional 2.2 (PDF da Agisoft, lido por inteiro nas partes de
+alinhamento, otimização, modelo de câmera, nuvem densa, DEM e
+ortomosaico) e as páginas de "processing options" do Pix4Dmapper.
+
+### O que eles fazem e onde estamos
+
+| Tema | Metashape | Pix4Dmapper | HTRMapper |
+|---|---|---|---|
+| Features no alinhamento | High = imagem original; Highest = 2x | Keypoints "Full" = escala original | imagem reduzida a 2000 px (~2,6x menor por lado) |
+| Pré-seleção de pares | por posição GNSS; para lavoura, recomenda **só** por referência | Aerial Grid / Corridor | espacial por GNSS (equivalente) |
+| Padrões repetidos (linhas de cana) | "Guided image matching" para vegetação | "Geometrically verified matching" | verificação geométrica padrão do COLMAP |
+| Modelo de lente | f, cx, cy, K1–K3, P1, P2 (+K4, B1, B2 opcionais) | R1–R3, T1, T2 | fx, fy, cx, cy, k1, k2, p1, p2 (sem k3) |
+| Lente em voo plano | "Adaptive camera model fitting" evita divergência | "All Prior" segura perto do inicial; método "Alternative" para lavoura nadir com GNSS preciso | refina tudo com travas rígidas (seção 27) |
+| Peso do GNSS | precisão por câmera, por eixo | por imagem | por imagem, com o desvio RTK (seção 27) |
+| Limpeza de tie points | gradual selection (USGS: incerteza ~10–15, projection accuracy ~2–3, reprojeção 0,3 px) + reotimização | — | só o filtro do COLMAP (4 px) |
+| Nuvem densa | Ultra = original; High = 1/2; Medium = 1/4 | padrão 1/2, multiescala | "media" = 1600 px (~1/3,3) |
+| Ruído da nuvem | filtro por componente conectado no depth map; confiança por ponto | — | consistência geométrica + mínimo de vistas da fusão do COLMAP |
+| Resolução do DEM | a da própria nuvem | 1x GSD | era 2,5x o espaçamento (0,63 m no voo real) |
+| Ruído no DEM | — | "noise filtering": altitude trocada pela mediana dos vizinhos | não havia |
+| Lacunas do DEM | padrão: só onde alguma foto vê; "Extrapolated" é opcional | triangulação recomendada para lavoura | extrapolava até o retângulo envolvente |
+| Mistura no ortomosaico | "Mosaic": multibanda junto da costura | — | foto mais vertical + transição de 2° (seção 26) |
+| Convenção de pixel | centro do primeiro pixel em (0,5; 0,5) | — | idem desde a seção 27 (o manual confirma a correção) |
+| Altitude DJI | depende do datum escolhido | supõe EGM96 salvo se a câmera estiver no banco como elipsoidal | usada como está (ver abaixo) |
+
+### Implementado agora: DEM
+
+Banco de testes reprodutível com superfície conhecida: talhão de
+300 × 250 m com 16 pontos/m² (a densidade do voo real), linhas de cana
+de 1,5 m com 15 cm de relevo, uma valeta de 2 m × 80 cm, um buraco de
+1.000 m² sem pontos, uma ponta do talhão sem dados, ruído de 3 cm e 0,5%
+de pontos espúrios de 0,5 a 3 m.
+
+| | Antes | Depois |
+|---|---|---|
+| Erro RMS (resolução automática) | 10,5 cm | 5,0 cm |
+| p99 do erro | 41 cm | 14 cm |
+| Células com erro > 30 cm | 1,25% | 0,08% |
+| Maior pico | 2,84 m | 0,89 m (célula metade dentro, metade fora da valeta) |
+| Buraco de 1.000 m² | 14,1 cm | 12,6 cm (as linhas de cana sozinhas somam 10,6) |
+| Terreno inventado fora dos dados | 4.621 m² | 498 m² (só a margem de 2 m) |
+| Tempo | 29 s | 1,2 s |
+
+Como ficou (`dem.generation`):
+1. mediana dos pontos de cada célula, em vez de interpolação linear dos
+   pontos crus (um ponto errado num triângulo contaminava toda a vizinhança);
+2. filtro de picos à la Pix4D: célula que se afasta da mediana 5 × 5 por
+   mais de 4 sigmas robustos (mínimo 15 cm) é descartada e reinterpolada,
+   **desde que** forme um grupo pequeno (≤ 1 m²). Sem essa condição, um
+   aterro de 1 m de largura foi apagado inteiro; com ela, sobrevive intacto
+   e 99% dos picos injetados ainda saem;
+3. lacunas pequenas pela média dos vizinhos; buracos grandes linearmente a
+   partir da borda real (crescer o buraco por anéis enviesava pela
+   inclinação: 23,7 cm contra 13,4 cm);
+4. NoData fora da área reconstruída (margem de 2 m ou 2 células, mais
+   buracos cercados por dados), como o modo padrão do Metashape. O
+   ortomosaico estende sozinho a cota mais próxima onde a câmera ainda vê o
+   chão, então não perde área;
+5. resolução automática de 2,0x o espaçamento (~4 pontos por célula,
+   ~2% de células vazias), grade alinhada a múltiplos da resolução,
+   GeoTIFF em blocos 256 com DEFLATE.
+
+### Bug corrigido: CRS de exportação
+
+A nuvem LAS e o DEM eram gravados com o rótulo do CRS de exportação
+(`export_epsg`), mas as coordenadas continuavam no CRS do projeto, porque
+nada reprojeta. Com exportação em EPSG:4674 (geográfico, graus), um DEM em
+UTM (metros) sairia rotulado como graus, no lugar errado do mundo. Um
+teste antigo exigia exatamente isso. Agora tudo declara o CRS em que as
+coordenadas realmente estão, e a CLI avisa que a reprojeção para o CRS de
+exportação ainda não existe. No voo real nada mudou, porque `export_epsg`
+não estava configurado.
+
+### Altitude da DJI
+
+O XMP do voo real traz `Version = 1.6` e `AltitudeType = RtkAlt`. Relatos
+de usuários (não há documento oficial da DJI) dizem que a partir da versão
+1.5 do XMP a altitude é elipsoidal, e é o que as correções RTK entregam.
+O Pix4D já tratou M3E como EGM96 por engano até a 4.8.3. Então as cotas do
+nosso DEM são, muito provavelmente, **elipsoidais** (SIRGAS 2000). Para
+cota ortométrica é preciso aplicar o modelo geoidal do IBGE (hgeoHNOR2020).
+Isso não afeta XY do mosaico nem volumes.
+
+### Candidatos que ficaram para decisão do usuário
+
+1. Features em resolução cheia no alinhamento (padrão de Metashape e Pix4D).
+2. Limpeza de tie points em etapas + reotimização (workflow USGS/Metashape).
+3. k3 no modelo de lente (o COLMAP só oferece k3 junto com os termos
+   racionais k4–k6, que ficaram superparametrizados na seção 27).
+4. Mistura multibanda nas costuras do ortomosaico (visual).
+5. Conversão opcional para altitude ortométrica (hgeoHNOR2020).
+6. Pontos de controle/verificação (marcadores com coordenada de campo), a
+   prova de precisão absoluta que nem Pix4D nem nós temos hoje no projeto.
+7. Reprojeção real para o CRS de exportação.
+

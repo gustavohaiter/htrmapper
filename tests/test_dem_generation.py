@@ -97,10 +97,9 @@ def test_geotransform_and_nodata_are_correct(tmp_path: Path):
         assert src.transform.a == pytest.approx(2.0)
 
 
-def test_no_holes_left_in_output_raster(tmp_path: Path):
-    """Hole-filling (nearest-neighbor beyond the linear-interpolation
-    convex hull) should mean no NaN/NoData pixels remain inside the point
-    cloud's bounding box."""
+def test_no_holes_left_where_the_cloud_covers_the_whole_area(tmp_path: Path):
+    """Empty cells between sparse points are interpolated: a cloud that
+    covers its whole bounding box leaves no NaN/NoData pixels."""
     las_path = tmp_path / "cloud.las"
     _write_synthetic_point_cloud(las_path)
 
@@ -148,3 +147,100 @@ def test_config_rejects_non_positive_resolution():
         DemConfig(resolution_m=0)
     with pytest.raises(ValueError):
         DemConfig(resolution_m=-1.0)
+
+
+def _write_points(path: Path, x: np.ndarray, y: np.ndarray, z: np.ndarray) -> None:
+    header = laspy.LasHeader(point_format=3, version="1.2")
+    header.scales = np.array([0.001, 0.001, 0.001])
+    header.offsets = np.array([x.min(), y.min(), z.min()])
+    las = laspy.LasData(header)
+    las.x, las.y, las.z = x, y, z
+    las.write(path)
+
+
+def _read_dem(path: Path):
+    with rasterio.open(path) as src:
+        band = src.read(1).astype(np.float64)
+        transform = src.transform
+        band[band == src.nodata] = np.nan
+    rows, cols = np.mgrid[0 : band.shape[0], 0 : band.shape[1]]
+    x = transform.c + (cols + 0.5) * transform.a
+    y = transform.f + (rows + 0.5) * transform.e
+    return band, x, y, transform
+
+
+def test_local_spikes_are_removed_but_a_narrow_real_feature_is_kept(tmp_path: Path):
+    # A dense cloud over a plane with a 1 m wide, 50 cm high embankment
+    # (narrower than the 5x5-cell noise window) plus isolated blunders of
+    # +-1.5 m: the blunders are local, so the global MAD filter keeps them,
+    # and the earlier linear interpolation spread each one into a spike.
+    rng = np.random.default_rng(3)
+    n = 120_000
+    x = rng.uniform(0.0, 100.0, n)
+    y = rng.uniform(0.0, 100.0, n)
+    embankment = (x >= 50.0) & (x < 51.0)
+    z = 600.0 + 0.01 * x + np.where(embankment, 0.5, 0.0) + rng.normal(0.0, 0.02, n)
+    blunders = (rng.random(n) < 0.003) & ~embankment
+    z[blunders] += rng.choice([-1.5, 1.5], blunders.sum())
+    las_path = tmp_path / "cloud.las"
+    _write_points(las_path, x, y, z)
+
+    result = run_dem_generation(las_path, 31983, tmp_path / "dem.tif", DemConfig(resolution_m=0.5))
+
+    band, gx, gy, _ = _read_dem(tmp_path / "dem.tif")
+    expected = 600.0 + 0.01 * gx + np.where((gx >= 50.0) & (gx < 51.0), 0.5, 0.0)
+    error = np.abs(band - expected)
+    assert np.nanmax(error[(gx < 49.0) | (gx > 52.0)]) < 0.15
+    assert np.nanmedian(band[(gx > 50.0) & (gx < 51.0)] - 600.0 - 0.01 * gx[(gx > 50.0) & (gx < 51.0)]) > 0.4
+    assert result.num_cells_despiked > 0
+
+
+def test_no_terrain_is_invented_outside_the_reconstructed_area(tmp_path: Path):
+    # An L-shaped cloud: the missing quadrant is inside the bounding box
+    # but has no points. It must be NoData (beyond the small gap margin),
+    # not nearest-neighbor terrain extrapolated out to the bounding box.
+    rng = np.random.default_rng(4)
+    x = rng.uniform(0.0, 100.0, 60_000)
+    y = rng.uniform(0.0, 100.0, 60_000)
+    keep = ~((x > 50.0) & (y > 50.0))
+    x, y = x[keep], y[keep]
+    las_path = tmp_path / "cloud.las"
+    _write_points(las_path, x, y, 600.0 + 0.0 * x)
+
+    result = run_dem_generation(las_path, 31983, tmp_path / "dem.tif", DemConfig(resolution_m=0.5))
+
+    band, gx, gy, _ = _read_dem(tmp_path / "dem.tif")
+    assert np.all(np.isnan(band[(gx > 55.0) & (gy > 55.0)]))
+    assert not np.any(np.isnan(band[(gx < 45.0) | (gy < 45.0)]))
+    assert 0.2 < result.nodata_fraction < 0.3
+
+
+def test_a_hole_enclosed_by_data_is_interpolated_across(tmp_path: Path):
+    # A 20 m wide gap in the middle of a tilted plane (water, a bare
+    # homogeneous patch): enclosed by reconstructed surface, so it is
+    # filled, and linearly -- it must follow the slope, not plateau.
+    rng = np.random.default_rng(5)
+    x = rng.uniform(0.0, 100.0, 60_000)
+    y = rng.uniform(0.0, 100.0, 60_000)
+    keep = (x - 50.0) ** 2 + (y - 50.0) ** 2 > 10.0**2
+    x, y = x[keep], y[keep]
+    las_path = tmp_path / "cloud.las"
+    _write_points(las_path, x, y, 600.0 + 0.05 * x + 0.02 * y)
+
+    run_dem_generation(las_path, 31983, tmp_path / "dem.tif", DemConfig(resolution_m=0.5))
+
+    band, gx, gy, _ = _read_dem(tmp_path / "dem.tif")
+    hole = (gx - 50.0) ** 2 + (gy - 50.0) ** 2 < 9.0**2
+    assert not np.any(np.isnan(band[hole]))
+    assert np.max(np.abs(band[hole] - (600.0 + 0.05 * gx[hole] + 0.02 * gy[hole]))) < 0.05
+
+
+def test_grid_is_snapped_to_multiples_of_the_resolution(tmp_path: Path):
+    las_path = tmp_path / "cloud.las"
+    _write_synthetic_point_cloud(las_path)
+
+    run_dem_generation(las_path, 31983, tmp_path / "dem.tif", DemConfig(resolution_m=0.5))
+
+    _, _, _, transform = _read_dem(tmp_path / "dem.tif")
+    assert transform.c / 0.5 == pytest.approx(round(transform.c / 0.5))
+    assert transform.f / 0.5 == pytest.approx(round(transform.f / 0.5))

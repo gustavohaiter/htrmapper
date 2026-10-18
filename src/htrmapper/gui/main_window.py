@@ -831,7 +831,7 @@ class MainWindow(QMainWindow):
         worker = PipelineWorker(
             run_dem_generation,
             Path(self.project.mvs.point_cloud_las_path),
-            self.project.crs.effective_export_epsg,
+            self.project.crs.project_epsg,
             Path(output_path),
             DemConfig(resolution_m=resolution_m),
         )
@@ -849,6 +849,9 @@ class MainWindow(QMainWindow):
             num_points_used=result.num_points_used,
             num_points_filtered_as_outliers=result.num_points_filtered_as_outliers,
             point_density_per_m2=result.point_density_per_m2,
+            num_cells_despiked=result.num_cells_despiked,
+            num_cells_interpolated=result.num_cells_interpolated,
+            nodata_fraction=result.nodata_fraction,
         )
 
         QMessageBox.information(
