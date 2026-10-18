@@ -138,3 +138,9 @@ class GeodeticTransformer:
             return GeodeticPoint(lon=lon, lat=lat, alt=alt)
         lon, lat = self._inverse_transformer.transform(point.x, point.y)
         return GeodeticPoint(lon=lon, lat=lat, alt=None)
+
+    def inverse_xy(self, x, y):
+        """Vectorized horizontal inverse: arrays of target-CRS x/y to
+        arrays of source-CRS lon/lat (always_xy order)."""
+        return self._inverse_transformer.transform(x, y)
+

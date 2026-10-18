@@ -120,6 +120,20 @@ DEFAULT_MAX_PRINCIPAL_POINT_OFFSET_RATIO = 0.02
 # flight), so this step only has to reject gross blunders: a few meters.
 PRIOR_ALIGNMENT_MAX_ERROR_M = 5.0
 
+# Tie point cleanup between adjustment passes, the automated equivalent of
+# Metashape's "gradual selection" + "Optimize Cameras" loop that the USGS
+# workflow scripts (ARCHITECTURE.md section 29). Each pass drops
+# observations reprojecting worse than max(factor x median point error,
+# floor), points triangulated at a very small angle (Metashape's
+# "reconstruction uncertainty") and points seen in too few images, then
+# re-adjusts. The floor keeps it from shaving a clean block: it removes
+# blunders, it does not chase a nicer number.
+DEFAULT_TIE_POINT_CLEANUP_MAX_PASSES = 3
+DEFAULT_TIE_POINT_ERROR_FACTOR = 3.0
+DEFAULT_TIE_POINT_MIN_ERROR_PX = 1.0
+DEFAULT_TIE_POINT_MIN_TRI_ANGLE_DEG = 1.5
+DEFAULT_TIE_POINT_MIN_TRACK_LENGTH = 3
+
 
 class BaError(RuntimeError):
     """Raised when the bundle adjustment cannot even start (as opposed to
@@ -133,6 +147,12 @@ class BaConfig:
     refine_principal_point: bool = True
     refine_distortion: bool = True
     use_per_image_rtk_sigma: bool = True
+    tie_point_cleanup: bool = True
+    tie_point_cleanup_max_passes: int = DEFAULT_TIE_POINT_CLEANUP_MAX_PASSES
+    tie_point_error_factor: float = DEFAULT_TIE_POINT_ERROR_FACTOR
+    tie_point_min_error_px: float = DEFAULT_TIE_POINT_MIN_ERROR_PX
+    tie_point_min_tri_angle_deg: float = DEFAULT_TIE_POINT_MIN_TRI_ANGLE_DEG
+    tie_point_min_track_length: int = DEFAULT_TIE_POINT_MIN_TRACK_LENGTH
     max_focal_change_ratio: float = DEFAULT_MAX_FOCAL_CHANGE_RATIO
     max_principal_point_offset_ratio: float = DEFAULT_MAX_PRINCIPAL_POINT_OFFSET_RATIO
     # Validated on the real flight with these tolerances (the looser
@@ -147,6 +167,8 @@ class BaConfig:
             raise ValueError(f"unknown robust_loss {self.robust_loss!r}; choose from {sorted(_ROBUST_LOSS_TYPES)}")
         if self.max_focal_change_ratio <= 0 or self.max_principal_point_offset_ratio <= 0:
             raise ValueError("intrinsics guard ratios must be positive")
+        if self.tie_point_cleanup_max_passes < 0 or self.tie_point_min_track_length < 2:
+            raise ValueError("tie point cleanup needs max_passes >= 0 and min_track_length >= 2")
 
     @classmethod
     def with_fixed_intrinsics(cls, **kwargs) -> "BaConfig":
@@ -184,6 +206,9 @@ class BaResult:
     intrinsics_refined: list[str] = field(default_factory=list)
     intrinsics_notes: list[str] = field(default_factory=list)
     images_excluded_from_rmse: list[str] = field(default_factory=list)
+    tie_points_before_cleanup: int = 0
+    reprojection_error_before_cleanup_px: float | None = None
+    tie_point_cleanup_passes: list[dict] = field(default_factory=list)
 
     def to_project_summary(self) -> "htrmapper.core.project.BaSummary":
         from htrmapper.core.project import BaSummary
@@ -206,6 +231,9 @@ class BaResult:
             intrinsics_refined=self.intrinsics_refined,
             intrinsics_notes=self.intrinsics_notes,
             images_excluded_from_rmse=self.images_excluded_from_rmse,
+            tie_points_before_cleanup=self.tie_points_before_cleanup,
+            reprojection_error_before_cleanup_px=self.reprojection_error_before_cleanup_px,
+            tie_point_cleanup_passes=self.tie_point_cleanup_passes,
         )
 
 
@@ -236,16 +264,15 @@ def _is_rtk_fix_or_unflagged(record: ImageRecord) -> bool:
 
 
 def _solve(
-    reconstruction_path: Path,
+    reconstruction: "pycolmap.Reconstruction",
     priors_by_name: dict[str, tuple[tuple[float, float, float], float, float]],
     config: BaConfig,
     refine_focal_length: bool,
     refine_principal_point: bool,
     refine_distortion: bool,
 ):
-    """One pose-prior bundle adjustment run on a fresh copy of the Phase 2
-    reconstruction. Returns (reconstruction, summary, gnss_by_image_id)."""
-    reconstruction = pycolmap.Reconstruction(str(reconstruction_path))
+    """One pose-prior bundle adjustment run, in place on `reconstruction`.
+    Returns (reconstruction, summary, gnss_by_image_id)."""
 
     ba_config = pycolmap.BundleAdjustmentConfig()
     pose_priors: list[pycolmap.PosePrior] = []
@@ -304,6 +331,32 @@ def _solve(
             "image positions)."
         )
     return reconstruction, summary, gnss_by_image_id
+
+
+def _mean_reprojection_error_px(reconstruction: "pycolmap.Reconstruction") -> float:
+    """Mean reprojection error of the reconstruction as it is NOW.
+
+    `compute_mean_reprojection_error()` averages the per-point errors
+    cached in the reconstruction, and the bundle adjuster moves cameras
+    and points without refreshing that cache: the adjusted result kept
+    reporting the Phase 2 value (0.499 px on every variant of the real
+    flight). Refresh first."""
+    reconstruction.update_point_3d_errors()
+    return reconstruction.compute_mean_reprojection_error()
+
+
+def _clean_tie_points(reconstruction: "pycolmap.Reconstruction", config: BaConfig) -> tuple[int, float]:
+    """One cleanup pass (see DEFAULT_TIE_POINT_* above), in place.
+    Returns (observations removed, reprojection threshold used in px)."""
+    reconstruction.update_point_3d_errors()
+    errors = np.array([point.error for point in reconstruction.points3D.values()])
+    if errors.size == 0:
+        return 0, 0.0
+    threshold_px = max(config.tie_point_min_error_px, config.tie_point_error_factor * float(np.median(errors)))
+    manager = pycolmap.ObservationManager(reconstruction)
+    removed = manager.filter_all_points3D(threshold_px, config.tie_point_min_tri_angle_deg)
+    removed += manager.filter_points3D_with_short_tracks(config.tie_point_min_track_length)
+    return int(removed), threshold_px
 
 
 def _implausible_intrinsics(
@@ -381,9 +434,18 @@ def run_gnss_weighted_bundle_adjustment(
     refine_focal = config.refine_focal_length
     refine_principal_point = config.refine_principal_point
     intrinsics_notes: list[str] = []
-    reconstruction, summary, gnss_by_image_id = _solve(
-        reconstruction_path, priors_by_name, config, refine_focal, refine_principal_point, config.refine_distortion
-    )
+    def solve_fresh():
+        # Always from the Phase 2 state, so a rejected run leaves no trace.
+        return _solve(
+            pycolmap.Reconstruction(str(reconstruction_path)),
+            priors_by_name,
+            config,
+            refine_focal,
+            refine_principal_point,
+            config.refine_distortion,
+        )
+
+    reconstruction, summary, gnss_by_image_id = solve_fresh()
     # Fixing one parameter can push the other out of bounds, hence the loop;
     # at most two re-runs, since each one fixes at least one more parameter.
     while refine_focal or refine_principal_point:
@@ -397,9 +459,37 @@ def run_gnss_weighted_bundle_adjustment(
             logger.warning(note)
         refine_focal = refine_focal and not focal_bad
         refine_principal_point = refine_principal_point and not principal_point_bad
-        reconstruction, summary, gnss_by_image_id = _solve(
-            reconstruction_path, priors_by_name, config, refine_focal, refine_principal_point, config.refine_distortion
-        )
+        reconstruction, summary, gnss_by_image_id = solve_fresh()
+
+    tie_points_before = reconstruction.num_points3D()
+    reprojection_error_before = _mean_reprojection_error_px(reconstruction)
+    cleanup_passes: list[dict] = []
+    if config.tie_point_cleanup:
+        for _ in range(config.tie_point_cleanup_max_passes):
+            removed, threshold_px = _clean_tie_points(reconstruction, config)
+            if removed == 0:
+                break
+            reconstruction, summary, gnss_by_image_id = _solve(
+                reconstruction, priors_by_name, config, refine_focal, refine_principal_point, config.refine_distortion
+            )
+            cleanup_passes.append(
+                {
+                    "max_error_px": threshold_px,
+                    "observations_removed": removed,
+                    "tie_points_left": reconstruction.num_points3D(),
+                    "mean_reprojection_error_px": _mean_reprojection_error_px(reconstruction),
+                }
+            )
+        if cleanup_passes and (refine_focal or refine_principal_point):
+            focal_bad, principal_point_bad, notes = _implausible_intrinsics(initial_cameras, reconstruction, config)
+            if (focal_bad and refine_focal) or (principal_point_bad and refine_principal_point):
+                # Thinner tie points made the lens drift: keep the result
+                # without cleanup rather than an implausible calibration.
+                intrinsics_notes.append(
+                    "tie point cleanup discarded, it let the intrinsics drift out of bounds: " + "; ".join(notes)
+                )
+                cleanup_passes = []
+                reconstruction, summary, gnss_by_image_id = solve_fresh()
 
     intrinsics_refined = [
         name
@@ -467,7 +557,7 @@ def run_gnss_weighted_bundle_adjustment(
         rmse_xy_cm=rmse_xy_cm,
         rmse_total_cm=rmse_total_cm,
         max_error_cm=max_error_cm,
-        mean_reprojection_error_px=reconstruction.compute_mean_reprojection_error(),
+        mean_reprojection_error_px=_mean_reprojection_error_px(reconstruction),
         num_residuals=summary.num_residuals,
         termination_type=str(summary.termination_type),
         converged=summary.is_solution_usable(),
@@ -476,4 +566,7 @@ def run_gnss_weighted_bundle_adjustment(
         intrinsics_refined=intrinsics_refined,
         intrinsics_notes=intrinsics_notes,
         images_excluded_from_rmse=images_excluded_from_rmse,
+        tie_points_before_cleanup=tie_points_before,
+        reprojection_error_before_cleanup_px=reprojection_error_before,
+        tie_point_cleanup_passes=cleanup_passes,
     )

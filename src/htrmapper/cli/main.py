@@ -10,6 +10,14 @@ from htrmapper.ba.weighted_bundle_adjustment import BaConfig, BaError, run_gnss_
 from htrmapper.core.project import DemSummary, GnssAccuracyConfig, MvsSummary, OrthoSummary, Project, ProjectCrsConfig
 from htrmapper.core.report import build_report_from_project, render_html
 from htrmapper.dem.generation import DemConfig, DemError, run_dem_generation
+from htrmapper.geo.checkpoints import (
+    DEFAULT_SEARCH_RADIUS_M,
+    CheckpointError,
+    evaluate_checkpoints,
+    read_field_points,
+    write_report_csv,
+)
+from htrmapper.geo.vertical import HGEOHNOR2020_DATUMS, VerticalError, write_orthometric_dem
 from htrmapper.geo.crs import CoordinateReferenceSystem
 from htrmapper.gnss.accuracy import CameraAccuracy
 from htrmapper.io.image_import import import_folder
@@ -138,7 +146,12 @@ def _cmd_adjust(args: argparse.Namespace) -> int:
         return 1
 
     workdir = Path(args.workdir)
-    config = BaConfig.with_fixed_intrinsics() if args.fix_intrinsics else BaConfig()
+    cleanup = not args.no_tie_point_cleanup
+    config = (
+        BaConfig.with_fixed_intrinsics(tie_point_cleanup=cleanup)
+        if args.fix_intrinsics
+        else BaConfig(tie_point_cleanup=cleanup)
+    )
 
     print(f"Adjusting project: {project.name}")
     print(f"GNSS accuracy: xy={project.gnss_accuracy.accuracy.xy_sigma_m} m, z={project.gnss_accuracy.accuracy.z_sigma_m} m")
@@ -164,6 +177,17 @@ def _cmd_adjust(args: argparse.Namespace) -> int:
             f"{', '.join(result.images_excluded_from_rmse)}"
         )
     print(f"Intrinsics refined: {', '.join(result.intrinsics_refined) or 'none (fixed)'}")
+    if result.tie_point_cleanup_passes:
+        print(
+            f"Tie point cleanup: {result.tie_points_before_cleanup} tie points, "
+            f"reprojection {result.reprojection_error_before_cleanup_px:.4f} px before"
+        )
+        for number, step in enumerate(result.tie_point_cleanup_passes, start=1):
+            print(
+                f"  pass {number}: removed {step['observations_removed']} observations "
+                f"(> {step['max_error_px']:.2f} px, small angle or short track), "
+                f"{step['tie_points_left']} tie points left, reprojection {step['mean_reprojection_error_px']:.4f} px"
+            )
     for note in result.intrinsics_notes:
         print(f"  warning: {note}")
     for camera_id, data in result.camera_calibration.items():
@@ -309,6 +333,118 @@ def _cmd_dem(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_orthometric(args: argparse.Namespace) -> int:
+    project_path = Path(args.project)
+    if not project_path.is_file():
+        print(f"error: project file not found: {project_path}", file=sys.stderr)
+        return 1
+    project = Project.load(project_path)
+    if project.dem is None or not project.dem.raster_path:
+        print("error: project has no Fase 5 (DEM) result; run 'htrmapper dem' first", file=sys.stderr)
+        return 1
+
+    print(f"Orthometric (normal) heights for project: {project.name}")
+    print(f"Ellipsoidal DEM: {project.dem.raster_path}")
+    print(f"Model: hgeoHNOR2020, vertical datum {args.datum}")
+    try:
+        result = write_orthometric_dem(
+            Path(project.dem.raster_path),
+            Path(args.output),
+            project.crs.project_epsg,
+            datum=args.datum,
+            grid_path=Path(args.geoid_grid) if args.geoid_grid else None,
+        )
+    except VerticalError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        f"Conversion factor FC: {result.min_conversion_factor_m:.3f} .. {result.max_conversion_factor_m:.3f} m "
+        "(H = h - FC)"
+    )
+    print(f"Elevation range (normal heights): [{result.min_elevation_m:.2f}, {result.max_elevation_m:.2f}] m")
+    print(f"GeoTIFF: {result.raster_path}")
+    print("The project DEM stays ellipsoidal: the orthomosaic needs heights in the cameras' reference.")
+
+    project.dem.orthometric_raster_path = result.raster_path
+    project.save(project_path)
+    print(f"\nProject updated: {project_path}")
+    return 0
+
+
+def _cmd_checkpoints(args: argparse.Namespace) -> int:
+    project_path = Path(args.project)
+    if not project_path.is_file():
+        print(f"error: project file not found: {project_path}", file=sys.stderr)
+        return 1
+    project = Project.load(project_path)
+    if project.ortho is None or not project.ortho.raster_path:
+        print("error: project has no Fase 6 (orthomosaic) result; run 'htrmapper ortho' first", file=sys.stderr)
+        return 1
+
+    dem_path = None
+    if project.dem is not None:
+        if args.field_heights == "orthometric":
+            dem_path = project.dem.orthometric_raster_path or None
+            if dem_path is None:
+                print(
+                    "error: field heights are orthometric but the project has no orthometric DEM; "
+                    "run 'htrmapper orthometric' first",
+                    file=sys.stderr,
+                )
+                return 1
+        else:
+            dem_path = project.dem.raster_path or None
+
+    try:
+        points = read_field_points(Path(args.points))
+    except CheckpointError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Check points for project: {project.name}")
+    print(f"Orthomosaic: {project.ortho.raster_path}")
+    print(f"DEM ({args.field_heights} heights): {dem_path or 'none'}")
+    print(f"Field points: {len(points)} from {args.points}")
+    print()
+
+    report = evaluate_checkpoints(
+        points,
+        Path(project.ortho.raster_path),
+        Path(dem_path) if dem_path else None,
+        search_radius_m=args.search_radius,
+        bright_targets=args.target_color == "bright",
+    )
+
+    def cm(value: float | None) -> str:
+        return "   -   " if value is None else f"{value * 100:+7.1f}"
+
+    print(f"{'point':<12} {'method':<10} {'dE cm':>7} {'dN cm':>7} {'2D cm':>7} {'dh cm':>7}  note")
+    for r in report.results:
+        print(f"{r.name:<12} {r.method:<10} {cm(r.dx)} {cm(r.dy)} {cm(r.d2d)} {cm(r.dz)}  {r.note}")
+    print()
+    print(
+        f"{'RMSE':<12} {'':<10} {cm(report.rmse('dx'))} {cm(report.rmse('dy'))} {cm(report.rmse('d2d'))} "
+        f"{cm(report.rmse('dz'))}"
+    )
+    print(f"{'mean (bias)':<12} {'':<10} {cm(report.mean('dx'))} {cm(report.mean('dy'))} {'':>7} {cm(report.mean('dz'))}")
+    print(
+        f"{'max |error|':<12} {'':<10} {cm(report.max_abs('dx'))} {cm(report.max_abs('dy'))} "
+        f"{cm(report.max_abs('d2d'))} {cm(report.max_abs('dz'))}"
+    )
+    not_found = [r.name for r in report.results if r.method == "not found"]
+    if not_found:
+        print(
+            f"\nNot found automatically: {', '.join(not_found)}. Measure their centers in QGIS and add "
+            "E_ortho / N_ortho columns to the CSV."
+        )
+
+    output = Path(args.output) if args.output else Path(args.points).with_name(Path(args.points).stem + "_relatorio.csv")
+    write_report_csv(report, output)
+    print(f"\nReport (CSV): {output}")
+    return 0
+
+
 def _cmd_ortho(args: argparse.Namespace) -> int:
     project_path = Path(args.project)
     if not project_path.is_file():
@@ -430,6 +566,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep focal length/principal point/distortion fixed at the Fase 2 values (default: refined, "
         "with guards against implausible values; see ARCHITECTURE.md section 27)",
     )
+    adjust_parser.add_argument(
+        "--no-tie-point-cleanup",
+        action="store_true",
+        help="Skip the iterative tie point cleanup + re-adjustment (default: on; ARCHITECTURE.md section 29)",
+    )
     adjust_parser.set_defaults(func=_cmd_adjust)
 
     dense_parser = subparsers.add_parser(
@@ -486,6 +627,47 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-filter", action="store_true", help="Disable outlier filtering (MAD-based) before rasterization"
     )
     dem_parser.set_defaults(func=_cmd_dem)
+
+    orthometric_parser = subparsers.add_parser(
+        "orthometric",
+        help="Extra DEM in normal (orthometric) heights via IBGE hgeoHNOR2020; the project DEM stays ellipsoidal",
+    )
+    orthometric_parser.add_argument("project", help="Path to a project .json file with a Fase 5 (DEM) result")
+    orthometric_parser.add_argument("--output", required=True, help="Path for the output GeoTIFF")
+    orthometric_parser.add_argument(
+        "--datum", choices=sorted(HGEOHNOR2020_DATUMS), default="imbituba", help="Vertical datum (default: imbituba)"
+    )
+    orthometric_parser.add_argument(
+        "--geoid-grid",
+        default=None,
+        help="Local hgeoHNOR2020 '...fator-conversao.txt' grid (default: downloaded from IBGE once and cached)",
+    )
+    orthometric_parser.set_defaults(func=_cmd_orthometric)
+
+    checkpoints_parser = subparsers.add_parser(
+        "checkpoints",
+        help="Absolute accuracy of the orthomosaic/DEM against targets measured in the field with an RTK rover",
+    )
+    checkpoints_parser.add_argument("project", help="Path to a project .json file with Fase 6 (orthomosaic) result")
+    checkpoints_parser.add_argument(
+        "--points",
+        required=True,
+        help="CSV from the rover: nome;E;N;h (project CRS), optional E_ortho;N_ortho with centers measured by hand",
+    )
+    checkpoints_parser.add_argument("--output", default=None, help="Report CSV (default: <points>_relatorio.csv)")
+    checkpoints_parser.add_argument(
+        "--search-radius", type=float, default=DEFAULT_SEARCH_RADIUS_M, help="Target search radius in m (default 1.0)"
+    )
+    checkpoints_parser.add_argument(
+        "--target-color", choices=["bright", "dark"], default="bright", help="Target lighter or darker than the ground"
+    )
+    checkpoints_parser.add_argument(
+        "--field-heights",
+        choices=["ellipsoidal", "orthometric"],
+        default="ellipsoidal",
+        help="Height reference of the rover's h column (orthometric uses the DEM from 'htrmapper orthometric')",
+    )
+    checkpoints_parser.set_defaults(func=_cmd_checkpoints)
 
     ortho_parser = subparsers.add_parser(
         "ortho", help="Fase 6: geração de ortomosaico ('htrmapper dense' e 'htrmapper dem' primeiro)"

@@ -722,6 +722,11 @@ class MainWindow(QMainWindow):
             f"Max error: {result.max_error_cm:.3f} cm",
             f"Intrínsecos refinados: {', '.join(result.intrinsics_refined) or 'nenhum (fixos)'}",
             *[f"Aviso: {note}" for note in result.intrinsics_notes],
+            *[
+                f"Limpeza de tie points, passo {n}: {step['observations_removed']} observações removidas, "
+                f"{step['tie_points_left']} tie points restantes, reprojeção {step['mean_reprojection_error_px']:.3f} px"
+                for n, step in enumerate(result.tie_point_cleanup_passes, start=1)
+            ],
         ]
         if result.images_excluded_from_rmse:
             detail_lines.append(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 import pycolmap
@@ -216,3 +217,77 @@ def test_raises_instead_of_silently_dropping_gnss_when_colmap_cannot_align(tmp_p
 
     with pytest.raises(BaError, match="did not use the GNSS"):
         run_gnss_weighted_bundle_adjustment(project, reconstruction_path, tmp_path / "ba_out", BaConfig())
+
+
+def _corrupted_copy(reconstruction_path: Path, out: Path, num_observations: int = 40, pixels: float = 15.0) -> Path:
+    """The Phase 2 reconstruction with `num_observations` image measurements
+    of one camera pushed `pixels` off: blunders of the kind a mismatched
+    tie point produces."""
+    reconstruction = pycolmap.Reconstruction(str(reconstruction_path))
+    image = reconstruction.image(next(iter(reconstruction.reg_image_ids())))
+    rng = np.random.default_rng(0)
+    observed = [i for i, point in enumerate(image.points2D) if point.has_point3D()][:num_observations]
+    for index in observed:
+        image.points2D[index].xy = image.points2D[index].xy + rng.normal(0.0, pixels, 2)
+    out.mkdir(parents=True, exist_ok=True)
+    reconstruction.write(out)
+    return out
+
+
+def _count_large_errors(reconstruction_path: str, threshold_px: float = 5.0) -> int:
+    reconstruction = pycolmap.Reconstruction(reconstruction_path)
+    count = 0
+    for image_id in reconstruction.reg_image_ids():
+        image = reconstruction.image(image_id)
+        for point2D in image.points2D:
+            if point2D.has_point3D():
+                xyz = reconstruction.point3D(point2D.point3D_id).xyz
+                uv = image.camera.img_from_cam(image.cam_from_world() * xyz)
+                count += int(np.linalg.norm(uv - point2D.xy) > threshold_px)
+    return count
+
+
+def test_tie_point_cleanup_removes_blunder_observations(tmp_path: Path):
+    project, reconstruction_path = _aligned_project_and_reconstruction(tmp_path)
+    corrupted = _corrupted_copy(reconstruction_path, tmp_path / "corrupted")
+
+    without = run_gnss_weighted_bundle_adjustment(
+        project, corrupted, tmp_path / "ba_without", BaConfig(tie_point_cleanup=False)
+    )
+    with_cleanup = run_gnss_weighted_bundle_adjustment(project, corrupted, tmp_path / "ba_with", BaConfig())
+
+    assert _count_large_errors(without.reconstruction_path) >= 30
+    assert _count_large_errors(with_cleanup.reconstruction_path) == 0
+    assert with_cleanup.tie_point_cleanup_passes
+    assert with_cleanup.mean_reprojection_error_px < without.mean_reprojection_error_px
+    assert with_cleanup.rmse_total_cm < 10.0
+
+
+def _independent_mean_reprojection_error(reconstruction_path: str) -> float:
+    """COLMAP's definition (mean over points of each point's mean error
+    over its track), recomputed by projecting every observation."""
+    reconstruction = pycolmap.Reconstruction(reconstruction_path)
+    per_point: dict[int, list[float]] = {}
+    for image_id in reconstruction.reg_image_ids():
+        image = reconstruction.image(image_id)
+        for point2D in image.points2D:
+            if point2D.has_point3D():
+                xyz = reconstruction.point3D(point2D.point3D_id).xyz
+                uv = image.camera.img_from_cam(image.cam_from_world() * xyz)
+                per_point.setdefault(point2D.point3D_id, []).append(float(np.linalg.norm(uv - point2D.xy)))
+    return float(np.mean([np.mean(errors) for errors in per_point.values()]))
+
+
+def test_reported_reprojection_error_reflects_the_adjusted_reconstruction(tmp_path: Path):
+    # The per-point errors cached in a COLMAP reconstruction are not
+    # refreshed by the bundle adjuster, so reading them after adjusting
+    # reported the Phase 2 value. With 40 observations corrupted by 15 px
+    # (no cleanup) the stale and the true value are far apart.
+    project, reconstruction_path = _aligned_project_and_reconstruction(tmp_path)
+    corrupted = _corrupted_copy(reconstruction_path, tmp_path / "corrupted")
+    result = run_gnss_weighted_bundle_adjustment(
+        project, corrupted, tmp_path / "ba", BaConfig(tie_point_cleanup=False)
+    )
+
+    expected = _independent_mean_reprojection_error(result.reconstruction_path)
+    assert result.mean_reprojection_error_px == pytest.approx(expected, rel=0.05)

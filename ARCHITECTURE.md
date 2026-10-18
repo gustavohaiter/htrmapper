@@ -1705,3 +1705,86 @@ Isso não afeta XY do mosaico nem volumes.
    prova de precisão absoluta que nem Pix4D nem nós temos hoje no projeto.
 7. Reprojeção real para o CRS de exportação.
 
+## 29. Melhorias escolhidas da revisão: tie points, resolução cheia, cota ortométrica, pontos de verificação
+
+O usuário escolheu quatro candidatos da seção 28.
+
+### Limpeza de tie points em etapas (Fase 3)
+
+Equivalente automático do ciclo "gradual selection" + "Optimize Cameras"
+do Metashape, como o script do USGS faz. Depois do ajuste (com as travas
+de lente), até 3 passes: saem as observações com reprojeção acima de
+max(3 × mediana do erro dos pontos, 1 px), os pontos triangulados com
+ângulo menor que 1,5° (o análogo da "reconstruction uncertainty") e os
+vistos em menos de 3 fotos; o ajuste roda de novo. O piso de 1 px faz o
+filtro tirar erros grosseiros, não perseguir um número bonito (o voo real
+tem média de ~0,5 px). Se a limpeza fizer a lente sair dos limites, o
+resultado sem limpeza é mantido e o motivo é anotado. CLI:
+`--no-tie-point-cleanup` desliga.
+
+Validado com 40 observações corrompidas em 15 px no voo sintético: sem
+limpeza, 39 continuam acima de 5 px depois do ajuste; com limpeza, nenhuma,
+e o erro médio cai de 0,31 para 0,08 px.
+
+**Bug encontrado no caminho:** o erro de reprojeção "final" que o `adjust`
+reportava era o da Fase 2. O COLMAP guarda o erro de cada ponto num cache
+que o bundle adjuster não atualiza, e `compute_mean_reprojection_error()`
+lê esse cache. Por isso todas as variantes do voo real mostravam
+exatamente 0,499 px. Agora o cache é atualizado antes da leitura (também
+na Fase 2), e um teste compara o valor reportado com um recálculo
+independente, projetando cada observação.
+
+### Alinhamento em resolução cheia
+
+Já existia como `htrmapper align --max-image-size -1` (seção 13). Falta
+medir no voo real o ganho contra 2000 px antes de mudar o padrão, porque
+o align fica mais lento.
+
+### Cota ortométrica (`geo.vertical`, `htrmapper orthometric`)
+
+O PROJ não distribui grade geoidal brasileira. A grade oficial do IBGE
+(`hgeoHNOR2020__IMBITUBA__fator-conversao.txt`, passo de 5', colunas
+longitude 0–360°, latitude e FC em metros) é baixada uma vez do FTP público
+do IBGE para `~/.cache/htrmapper`, ou lida de uma cópia local
+(`--geoid-grid`). H = h − FC; na fazenda 20046, FC ≈ −6,03 m, então a cota
+normal fica ~6 m acima da elipsoidal.
+
+O resultado é um **arquivo à parte** (`DemSummary.orthometric_raster_path`).
+O DEM do projeto continua elipsoidal de propósito: as câmeras estão em
+altitude elipsoidal, e um ortomosaico calculado sobre cotas normais erraria
+o chão em ~6 m, deslocando os pixels da borda em até ~3,5 m (6 m × tan 30°).
+Células fora do modelo são erro, nunca deixadas elipsoidais em silêncio; um
+DEM já convertido (tag `HTRMAPPER_VERTICAL_REFERENCE`) não é convertido de
+novo. Os testes usam um recorte real da grade do IBGE em volta do talhão.
+
+### Pontos de verificação (`geo.checkpoints`, `htrmapper checkpoints`)
+
+Concordar com o Pix4D prova consistência, não precisão, porque os dois partem
+dos mesmos geotags. A prova são alvos medidos em campo com rover RTK.
+
+- Entrada: CSV do rover (`nome;E;N;h`, no CRS do projeto, com `;`/`,`/tab
+  e vírgula decimal), opcionalmente com `E_ortho;N_ortho` medidos à mão no
+  QGIS.
+- Horizontal: num raio de 1 m da coordenada de campo, o alvo é a mancha
+  clara (ou escura, `--target-color dark`) de 0,05–4 m² mais próxima,
+  separada do fundo por um limiar no meio do caminho entre a mediana da
+  janela e o percentil 1%/99%. O centro da mancha é a posição medida.
+  O limiar de Otsu foi testado e descartado, porque divide ao meio a
+  textura das linhas de cana quando o alvo ocupa pouco da janela. Contraste
+  menor que 30 níveis contra um anel de 20 cm em volta do alvo vira "não
+  encontrado", nunca um palpite.
+- Vertical: cota do DEM (bilinear) menos a altura de campo, usando o DEM
+  ortométrico quando `--field-heights orthometric`.
+- Saída: tabela por ponto, RMSE, média (viés) e máximo, mais um CSV com
+  `;` para planilha.
+
+Validado com ortomosaico sintético texturizado e alvos deslocados de valores
+conhecidos (12 cm L, 7 cm S): o erro medido bate dentro de 1 GSD; alvo
+escuro, medida manual, ausência de alvo e um objeto claro concorrente
+dentro do raio também são cobertos.
+
+Ainda não implementado: usar os alvos como **pontos de controle** dentro do
+ajuste (marcadores observados nas fotos, como no Metashape). O caminho
+técnico existe no pycolmap (um ponto 3D fixo com as observações do alvo
+em cada foto), mas exige localizar o alvo em cada imagem.
+

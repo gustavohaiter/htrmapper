@@ -204,6 +204,9 @@ class BaSummary:
     intrinsics_refined: list[str] = field(default_factory=list)
     intrinsics_notes: list[str] = field(default_factory=list)
     images_excluded_from_rmse: list[str] = field(default_factory=list)
+    tie_points_before_cleanup: int = 0
+    reprojection_error_before_cleanup_px: float | None = None
+    tie_point_cleanup_passes: list = field(default_factory=list)
     ran_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
     def to_dict(self) -> dict:
@@ -264,6 +267,7 @@ class DemSummary:
     num_cells_despiked: int = 0
     num_cells_interpolated: int = 0
     nodata_fraction: float = 0.0
+    orthometric_raster_path: str = ""  # extra copy in normal heights; raster_path stays ellipsoidal
     ran_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
     def to_dict(self) -> dict:
@@ -271,7 +275,7 @@ class DemSummary:
 
     @classmethod
     def from_dict(cls, data: dict) -> "DemSummary":
-        return cls(**_normalize_path_fields(data, ("raster_path",)))
+        return cls(**_normalize_path_fields(data, ("raster_path", "orthometric_raster_path")))
 
 
 @dataclass

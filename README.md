@@ -132,6 +132,13 @@ Implementado nesta fase:
   juntas expôs e corrigiu um deadlock real de `fork()` (chamar
   `nvidia-smi` enquanto o COLMAP tem várias threads nativas ativas). GUI:
   `htrmapper-gui`. Ver `ARCHITECTURE.md` seção 18.
+- **Precisão e verificação** (seção 29): o ajuste limpa os tie points em
+  etapas e reotimiza (como a "gradual selection" do Metashape no fluxo
+  do USGS); `htrmapper orthometric` grava uma cópia do DEM em altitude
+  normal pelo modelo hgeoHNOR2020 do IBGE (o DEM do projeto continua
+  elipsoidal, como o ortomosaico precisa); `htrmapper checkpoints` mede
+  o erro absoluto do ortomosaico e do DEM contra alvos medidos em campo
+  com rover RTK, achando o centro de cada alvo automaticamente.
 
 ## Instalação (desenvolvimento)
 
@@ -175,6 +182,10 @@ htrmapper dense projeto.json --workdir ./work_dense --quality media
 htrmapper dem projeto.json --output dem.tif
 
 htrmapper ortho projeto.json --output ortho.tif
+
+# opcionais
+htrmapper orthometric projeto.json --output dem_ortometrico.tif   # altitude normal (IBGE hgeoHNOR2020)
+htrmapper checkpoints projeto.json --points pontos_rover.csv      # erro contra alvos de campo
 ```
 
 ## Uso — GUI

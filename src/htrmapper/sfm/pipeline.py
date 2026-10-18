@@ -383,6 +383,7 @@ def run_structure_from_motion(
     result.num_registered = primary.num_reg_images()
     result.num_points3d = primary.num_points3D()
     result.num_observations = primary.compute_num_observations()
+    primary.update_point_3d_errors()  # the cached per-point errors are not kept current
     result.mean_reprojection_error_px = primary.compute_mean_reprojection_error()
 
     _report("Georreferenciando (alinhamento ao GNSS)")
