@@ -202,6 +202,17 @@ dependência nova de uma fase mais recente num `.venv` criado antes dela —
 ex. `pycolmap` da Fase 2), antes de chamar `htrmapper-gui`. Depois de um
 `git pull`, é só rodar `run_gui.bat` de novo normalmente.
 
+## Otimizador de ortomosaico (QGIS)
+
+`tools/otimizador_ortomosaico_qgis.py` é um script independente para rodar
+dentro do QGIS (Terminal Python → Mostrar editor → abrir → Executar). Ele
+converte qualquer ortomosaico GeoTIFF RGB 8 bits (do HTRMapper, Pix4D,
+Metashape...) num GeoTIFF tiled com pirâmides internas em EPSG:31983, com
+compressão escolhida (JPEG q90 por padrão), e valida o resultado. Quando a
+entrada já está em EPSG:31983 com resolução automática, os pixels são
+copiados 1:1 na mesma grade (sem reamostragem, sem deslocamento). Não usa
+nenhum módulo do HTRMapper; precisa só do Python do próprio QGIS.
+
 ## Testes
 
 Toda a suíte usa dados sintéticos (JPEGs com EXIF + XMP DJI fabricados em
