@@ -143,7 +143,7 @@ def phase_shift(
     # Refine to 1/UPSAMPLE px around the integer peak.
     coarse = np.array([peak_r - zero_r, peak_c - zero_c], dtype=float)
     region = int(np.ceil(UPSAMPLE * 1.5))
-    center_idx = np.fix(region / 2.0)
+    center_idx = np.trunc(region / 2.0)
     fine = np.real(np.conj(_upsampled_dft(np.conj(cross), region, UPSAMPLE, center_idx - coarse * UPSAMPLE)))
     best = np.array(np.unravel_index(int(np.argmax(fine)), fine.shape), dtype=float)
     shift = coarse + (best - center_idx) / UPSAMPLE
