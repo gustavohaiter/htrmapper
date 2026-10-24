@@ -31,6 +31,7 @@ def _normalize_path_fields(data: dict, keys: tuple[str, ...]) -> dict:
     updates = {k: normalize_path_for_current_platform(data[k]) for k in keys if data.get(k)}
     return {**data, **updates} if updates else data
 
+
 SCHEMA_VERSION = 1
 
 
@@ -301,6 +302,32 @@ class OrthoSummary:
 
 
 @dataclass
+class ProcessingSummary:
+    """Persisted state of an automatic run (`pipeline.auto`): the level,
+    which steps finished (and how long each took), and the final products.
+    It is what lets a re-run resume after the last finished step."""
+
+    level: str = ""
+    images_folder: str = ""
+    output_folder: str = ""
+    image_names: list[str] = field(default_factory=list)
+    steps_done: dict = field(default_factory=dict)  # step key -> {"seconds": float, "finished_at": iso}
+    products: dict = field(default_factory=dict)  # product key -> path
+    started_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    finished_at: str = ""
+    software_version: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ProcessingSummary":
+        data = _normalize_path_fields(data, ("images_folder", "output_folder"))
+        products = {k: normalize_path_for_current_platform(v) for k, v in data.get("products", {}).items() if v}
+        return cls(**{**data, "products": products})
+
+
+@dataclass
 class Project:
     """Top-level project state, serializable to/from a JSON project file."""
 
@@ -315,6 +342,7 @@ class Project:
     mvs: MvsSummary | None = None
     dem: DemSummary | None = None
     ortho: OrthoSummary | None = None
+    processing: ProcessingSummary | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -329,6 +357,7 @@ class Project:
             "mvs": self.mvs.to_dict() if self.mvs else None,
             "dem": self.dem.to_dict() if self.dem else None,
             "ortho": self.ortho.to_dict() if self.ortho else None,
+            "processing": self.processing.to_dict() if self.processing else None,
         }
 
     @classmethod
@@ -344,6 +373,7 @@ class Project:
         mvs_data = data.get("mvs")
         dem_data = data.get("dem")
         ortho_data = data.get("ortho")
+        processing_data = data.get("processing")
         return cls(
             name=data["name"],
             created_at=data.get("created_at", datetime.now().isoformat()),
@@ -356,6 +386,7 @@ class Project:
             ba=BaSummary.from_dict(ba_data) if ba_data else None,
             dem=DemSummary.from_dict(dem_data) if dem_data else None,
             ortho=OrthoSummary.from_dict(ortho_data) if ortho_data else None,
+            processing=ProcessingSummary.from_dict(processing_data) if processing_data else None,
         )
 
     def save(self, path: Path) -> None:

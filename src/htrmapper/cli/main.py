@@ -499,9 +499,45 @@ def _cmd_ortho(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_processar(args: argparse.Namespace) -> int:
+    from htrmapper.pipeline.auto import AutoRequest, main_for_cli
+
+    request = AutoRequest(
+        images_folder=Path(args.fotos),
+        output_folder=Path(args.saida),
+        level=args.nivel,
+        delete_workdir_on_success=args.apagar_trabalho,
+    )
+    return main_for_cli(request, resume=not args.recomecar)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="htrmapper", description="HTRMapper photogrammetry CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    processar_parser = subparsers.add_parser(
+        "processar",
+        help="Processamento automático completo: fotos -> ortomosaico, DEM e relatório PDF",
+    )
+    processar_parser.add_argument("fotos", help="Pasta com as fotos do voo")
+    processar_parser.add_argument("--saida", required=True, help="Pasta onde salvar os resultados")
+    processar_parser.add_argument(
+        "--nivel",
+        choices=["baixo", "medio", "alto"],
+        default="medio",
+        help="baixo = visualização rápida; medio = mapeamento (padrão, validado contra o Pix4D); alto = o mais completo",
+    )
+    processar_parser.add_argument(
+        "--recomecar",
+        action="store_true",
+        help="Ignora um processamento anterior na pasta de saída e recomeça do zero (padrão: continua de onde parou)",
+    )
+    processar_parser.add_argument(
+        "--apagar-trabalho",
+        action="store_true",
+        help="Apaga a pasta 'trabalho' (dados intermediários) ao terminar com sucesso, para liberar espaço",
+    )
+    processar_parser.set_defaults(func=_cmd_processar)
 
     import_parser = subparsers.add_parser("import", help="Import a folder of images into a project")
     import_parser.add_argument("folder", help="Path to the folder containing source images")

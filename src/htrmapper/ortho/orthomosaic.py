@@ -120,10 +120,15 @@ class OrthoConfig:
     resolution_m: float | None = None  # None = automatic, from camera GSD (see module docstring)
     # None = keep every pixel any camera sees, however obliquely.
     max_view_angle_deg: float | None = DEFAULT_MAX_VIEW_ANGLE_DEG
+    # Multiplies the automatic resolution only (ignored with resolution_m):
+    # 2.0 gives a pixel twice the camera GSD, a quarter of the pixels.
+    resolution_scale: float = 1.0
 
     def __post_init__(self) -> None:
         if self.resolution_m is not None and self.resolution_m <= 0:
             raise ValueError(f"resolution_m must be positive, got {self.resolution_m}")
+        if self.resolution_scale <= 0:
+            raise ValueError(f"resolution_scale must be positive, got {self.resolution_scale}")
         if self.max_view_angle_deg is not None and not (0.0 < self.max_view_angle_deg < 90.0):
             raise ValueError(f"max_view_angle_deg must be in (0, 90), got {self.max_view_angle_deg}")
 
@@ -404,6 +409,9 @@ def run_orthomosaic_generation(
             # fabricating a number or crashing.
             resolution_m = abs(dem_transform.a)
             resolution_source = "automatic (fallback: DEM resolution)"
+        if config.resolution_scale != 1.0:
+            resolution_m *= config.resolution_scale
+            resolution_source += f" x{config.resolution_scale:g}"
 
     width_px, height_px, transform = _output_geometry(dem_transform, dem_width_px, dem_height_px, resolution_m)
     interpolator = _build_dem_interpolator(dem_transform, dem_width_px, dem_height_px, dem_elevation)

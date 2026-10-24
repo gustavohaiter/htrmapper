@@ -15,13 +15,23 @@ dependencies = [
     "numpy>=1.26",
     "psutil>=5.9",
     "matplotlib>=3.8",
-    "pycolmap>=4.0,<5",
     "laspy>=2.5",
     "rasterio>=1.3",
     "scipy>=1.11",
+    "reportlab>=4.0",
 ]
 
 [project.optional-dependencies]
+# Exactly one of cpu / cuda. They are kept out of the base dependencies on
+# purpose: both install the same `pycolmap` module, and a base requirement on
+# the CPU build would silently overwrite the CUDA build on every
+# `pip install -e .` (the dense cloud then fails with "no GPU").
+cpu = [
+    "pycolmap>=4.0,<5",
+]
+cuda = [
+    "pycolmap-cuda12>=4.0,<5",
+]
 gui = [
     "PySide6>=6.6",
 ]
@@ -31,7 +41,7 @@ dev = [
 
 [project.scripts]
 htrmapper = "htrmapper.cli.main:main"
-htrmapper-gui = "htrmapper.gui.main_window:run"
+htrmapper-gui = "htrmapper.gui.auto_window:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]

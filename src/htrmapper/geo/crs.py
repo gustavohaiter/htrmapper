@@ -105,6 +105,27 @@ def sirgas2000_utm23s() -> CoordinateReferenceSystem:
     return CoordinateReferenceSystem(SIRGAS2000_UTM23S_EPSG)
 
 
+def sirgas2000_utm_epsg(lon: float, lat: float) -> int:
+    """EPSG code of the SIRGAS 2000 / UTM zone containing (lon, lat), looked
+    up in the PROJ database. The zone comes from the standard 6-degree
+    formula, so a point on a zone boundary gets one definite answer (PROJ's
+    area-of-use query alone returns both neighbors there)."""
+    from pyproj.aoi import AreaOfInterest
+    from pyproj.database import query_utm_crs_info
+
+    zone = int((lon + 180.0) // 6.0) + 1
+    hemisphere = "S" if lat < 0 else "N"
+    wanted = f"zone {zone}{hemisphere}"
+    candidates = query_utm_crs_info(
+        datum_name="SIRGAS 2000",
+        area_of_interest=AreaOfInterest(lon - 3.0, lat - 1.0, lon + 3.0, lat + 1.0),
+    )
+    for info in candidates:
+        if info.name.endswith(wanted):
+            return int(info.code)
+    raise ValueError(f"no SIRGAS 2000 / UTM {wanted} CRS in the PROJ database for lon={lon:.4f}, lat={lat:.4f}")
+
+
 class GeodeticTransformer:
     """Correct geodetic transform between two CRSs, using PROJ.
 
@@ -143,4 +164,3 @@ class GeodeticTransformer:
         """Vectorized horizontal inverse: arrays of target-CRS x/y to
         arrays of source-CRS lon/lat (always_xy order)."""
         return self._inverse_transformer.transform(x, y)
-

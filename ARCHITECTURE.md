@@ -1804,3 +1804,119 @@ ajuste (marcadores observados nas fotos, como no Metashape). O caminho
 técnico existe no pycolmap (um ponto 3D fixo com as observações do alvo
 em cada foto), mas exige localizar o alvo em cada imagem.
 
+
+## 30. Ortomosaico validado contra o Pix4D (`tools/comparar_ortomosaicos.py`)
+
+Para medir em centímetros o quanto o nosso ortomosaico concorda com o de
+outro programa, o script compara os dois em janelas de 256 px numa grade
+de pontos (padrão: a cada 20 m). Em cada janela usa correlação de fase,
+com refinamento por DFT superamostrada (1/20 px, Guizar-Sicairos 2008) e um
+passa-baixa gaussiano: sem ele, os detalhes mais finos, que diferem entre
+os dois mosaicos (reamostragem, JPEG), dominavam a correlação, e o erro
+do método era de ~2,4 cm no teste sintético; com ele, ~0,25 cm. A busca é
+limitada a ±30 px em torno de um deslocamento global medido antes a
+~40 cm/px, para não "pular" de uma linha de cana para a vizinha (~1,5 m).
+A referência pode estar em outro CRS: o Pix4D grava EPSG:32723, e o PROJ
+converte WGS 84 → SIRGAS 2000 sem deslocamento.
+
+Resultado no voo real da fazenda 20046 (`ortho_v5`, nível Médio, contra o
+Pix4D, 133 pontos aceitos de 136):
+
+| | dE | dN | 2D |
+|---|---|---|---|
+| Mediana | −0,9 cm | +0,5 cm | 3,7 cm |
+| Desvio / RMSE | 4,5 cm | 4,2 cm | RMSE 6,2 cm |
+| p95 / máximo | | | 11,9 / 22,9 cm |
+
+Não há deslocamento sistemático (menos de meio pixel). As diferenças
+maiores ficam nas bordas do voo, onde há menos sobreposição e as fotos são
+mais inclinadas, e o usuário confirmou isso no QGIS ponto a ponto. A
+diferença de +0,29 m entre os DSMs (seção 29) vem da correlação focal ×
+altura e não desloca o mosaico em XY.
+
+## 31. Processamento automático, relatório PDF e instalação no Windows
+
+**Um clique** (`pipeline.auto`, `htrmapper processar`, janela
+`gui.auto_window`): importar → alinhar → ajustar → nuvem densa → DEM →
+ortomosaico → relatório PDF, sem perguntas no meio. Decisões:
+
+- **Níveis** (`pipeline.levels`). O Médio é exatamente a configuração
+  validada contra o Pix4D (seção 30). O Baixo usa 8.000 pontos-chave, nuvem
+  densa "baixa" e ortomosaico com pixel de 2x o GSD (`OrthoConfig.resolution_scale`).
+  O Alto usa a nuvem densa "alta". A resolução cheia no alinhamento ficou
+  fora do Alto porque não trouxe ganho medido (seção 29).
+- **CRS automático**: SIRGAS 2000 / UTM da zona das fotos
+  (`geo.crs.sirgas2000_utm_epsg`). A zona sai da fórmula de 6°, para dar uma
+  resposta só quando o ponto cai na divisa, e o EPSG vem do banco do PROJ.
+- **Verificação prévia**: fotos (no mínimo 3), escrita na saída, GPU CUDA e
+  espaço em disco. Uma falta de GPU aparece em segundos, não depois de 10
+  minutos de alinhamento.
+- **Retomada**: cada etapa concluída é gravada em `projeto.json`
+  (`ProcessingSummary`). Rodar de novo com as mesmas fotos e o mesmo nível
+  pula as etapas cujas saídas ainda existem, até a primeira que falta (as
+  seguintes dependem dela). Outro nível ou outras fotos na mesma pasta: o
+  programa recusa, e só recomeça do zero se o usuário pedir.
+- **Erros**: a etapa fica marcada como erro, e `ERRO_<data>.txt` na pasta de
+  saída guarda a mensagem, o traceback, as versões, o hardware e o fim do
+  log. A mensagem da tela é em português simples (disco cheio, RAM, etc.).
+  `processamento.log` registra tudo. O log do próprio COLMAP (glog) vai para
+  `trabalho/logs/colmap_*`, via `pycolmap.logging.set_log_destination`.
+- **Pasta de trabalho**: `<saída>/trabalho`. Mas no WSL, com a saída num disco
+  do Windows (`/mnt/c/...`), ela fica em `~/.local/share/htrmapper/trabalho/`:
+  a nuvem densa grava GB de mapas de profundidade, e o disco do Windows é
+  bem mais lento de dentro do WSL. Ela só é apagada se tiver as subpastas
+  que o próprio programa cria.
+- **Tempo estimado** (`pipeline.timing`): cada etapa concluída grava
+  segundos/foto, nível e hardware em `~/.local/share/htrmapper/tempos_processamento.json`.
+  A estimativa usa a mediana desse histórico no mesmo PC. Sem histórico, usa
+  os tempos do PC de referência (Ryzen 7 5700G + RTX 3060 Ti) e avisa que é
+  uma estimativa inicial. Durante o processamento, o tempo restante é
+  reescalado pela razão real/estimado das etapas já feitas.
+
+**Relatório PDF** (`report.pdf`, `report.stats`), no modelo do quality report
+do Pix4D e do processing report do Metashape. Tudo é medido nas saídas
+reais, e o que não dá para medir sai como "não disponível":
+
+- resumo;
+- verificação de qualidade com os critérios do Pix4D (pontos-chave por foto
+  > 10.000, fotos alinhadas > 95%, variação da focal < 5%, correspondências
+  por foto > 1.000), mais reprojeção < 1 px e georreferenciamento. Este fica
+  amarelo, como no Pix4D, enquanto não houver pontos de controle;
+- prévias do ortomosaico e do DEM com relevo sombreado;
+- posições das câmeras, com vetores câmera × GNSS e distribuição em faixas
+  de σ (a "Absolute Geolocation Variance");
+- mapa de sobreposição (fotos que veem cada célula do DEM);
+- calibração (inicial × otimizada, curva de distorção radial, resíduos
+  médios na imagem);
+- ajuste de feixes (pontos 3D por número de fotos, passes de limpeza);
+- nuvem, DEM e ortomosaico;
+- parâmetros, tempos por etapa, hardware e avisos;
+- anexo por foto.
+
+A fonte DejaVu (que vem com o matplotlib) cobre todos os símbolos.
+
+**Instalação no Windows** (`windows/`): `INSTALAR.bat` →
+`instalar_htrmapper.ps1` (como administrador). O script confere o build do
+Windows (≥ 19044) e a GPU NVIDIA, avisa se a virtualização estiver
+desligada na BIOS (seção 23) e instala o WSL e o Ubuntu 24.04. Para quando
+precisa de reinício ou da criação do usuário, e pode ser rodado de novo.
+Depois chama `instalar_wsl.sh`, que instala:
+
+- os pacotes do Ubuntu e as bibliotecas do Qt para o WSLg;
+- `.venv` com `pip install -e ".[gui,cuda]"`, conferindo `pycolmap.has_cuda`;
+- o lançador `~/.local/bin/htrmapper-abrir`, que usa `QT_QPA_PLATFORM=xcb`
+  para a janela ter a barra de título do Windows e grava a saída em `gui.log`.
+
+`criar_atalhos.ps1` cria o atalho na Área de Trabalho e no Menu Iniciar. Ele
+aponta para `wscript.exe HTRMapper.vbs`, que abre o WSL sem terminal e
+mostra uma caixa com o caminho do log se a janela fechar com erro. Junto vai
+um "Atualizar HTRMapper" (`git pull` + `instalar_wsl.sh`).
+
+O `pycolmap` saiu das dependências base e foi para os extras `cpu`/`cuda`. Os
+dois pacotes instalam o mesmo módulo, e o requisito base do de CPU
+sobrescrevia o de CUDA a cada `pip install -e .`.
+
+**Não validado aqui**: os scripts PowerShell/VBS e o lançamento pelo WSLg não
+puderam ser executados neste ambiente (Linux sem Windows nem PowerShell). O
+processamento, o relatório e a janela foram testados de ponta a ponta com o
+voo sintético, com a nuvem densa simulada (sem GPU aqui).

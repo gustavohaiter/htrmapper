@@ -1,0 +1,4 @@
+windows/*.bat text eol=crlf
+windows/*.ps1 text eol=crlf
+windows/*.sh text eol=lf
+windows/*.ico binary

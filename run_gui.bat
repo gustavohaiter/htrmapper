@@ -14,6 +14,6 @@ REM Reinstala/atualiza sempre, nao so na primeira vez: cada fase nova pode
 REM ter adicionado uma dependencia (ex. pycolmap na Fase 2, rasterio na
 REM Fase 5) que um .venv criado antes dela nao tem. pip nao reinstala o
 REM que ja esta satisfeito, entao isso e rapido quando nada mudou.
-pip install -e ".[gui,dev]"
+pip install -e ".[gui,cpu,dev]"
 
 htrmapper-gui

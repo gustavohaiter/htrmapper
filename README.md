@@ -8,6 +8,29 @@ arquitetura, bibliotecas, riscos e o plano de fases.
 Foco atual do usuário: DJI Mavic 3M, imagens já geotaggeadas via PPK,
 SIRGAS 2000 / UTM 23S (EPSG:31983), agricultura sem GCP.
 
+## Começo rápido (Windows + placa NVIDIA)
+
+**PC novo:** copie esta pasta para o PC (ou baixe o ZIP do GitHub), entre em
+`windows\` e dê duplo clique em `INSTALAR.bat`. Ele confere o Windows e a
+placa NVIDIA, instala o WSL e o Ubuntu (pode pedir para reiniciar e rodar de
+novo), instala o HTRMapper com a GPU dentro do Ubuntu e cria o atalho
+**HTRMapper** na Área de Trabalho. Detalhes em `ARCHITECTURE.md` seção 31.
+
+**PC que já roda o HTRMapper no WSL** (terminal do Ubuntu):
+
+```bash
+cd ~/htrmapper && git pull
+bash windows/instalar_wsl.sh --criar-atalhos
+```
+
+Depois é só abrir pelo atalho **HTRMapper**: escolher a pasta das fotos, a
+pasta de saída e o nível (Baixo / Médio / Alto), e clicar em **Processar**.
+Ele faz alinhamento, ajuste com o RTK, nuvem densa, DEM, ortomosaico e o
+relatório PDF sozinho, mostrando cada etapa e o tempo restante. Se der erro,
+mostra na tela e salva um `ERRO_<data>.txt` na pasta de saída; rodando de
+novo, continua de onde parou. Para atualizar: Menu Iniciar → HTRMapper →
+**Atualizar HTRMapper**.
+
 ## Status: Fase 1 + 2 + 3 + 4 + 5 + 6 + 7 (importação → SfM → ajuste GNSS → nuvem densa → DEM → ortomosaico → interface completa)
 
 Implementado nesta fase:
@@ -145,8 +168,12 @@ Implementado nesta fase:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[gui,dev]"
+pip install -e ".[gui,cpu,dev]"     # dentro do WSL com GPU: ".[gui,cuda,dev]"
 ```
+
+O `pycolmap` fica nos extras `cpu` (sem GPU) e `cuda` (`pycolmap-cuda12`),
+nunca nos dois: os dois instalam o mesmo módulo, e o de CPU sobrescreveria
+o de GPU em silêncio.
 
 ## Windows + GPU real (WSL2) — para a Fase 4 (nuvem densa) e além
 
@@ -164,7 +191,29 @@ PCs que nunca usaram máquina virtual), o Windows acusa
 `HCS_E_HYPERV_NOT_INSTALLED` ao instalar o WSL2 — a seção 23 documenta
 como resolver isso também.
 
-## Uso — CLI
+## Uso — processamento automático
+
+Na janela (`htrmapper-gui` ou o atalho do Windows): pasta das fotos, pasta de
+saída, nível e **Processar**. Pelo terminal, o mesmo:
+
+```bash
+htrmapper processar /caminho/das/fotos --saida /caminho/da/saida --nivel medio
+#   --nivel baixo | medio | alto     (padrão: medio, a configuração validada contra o Pix4D)
+#   --recomecar                      ignora um processamento anterior na pasta de saída
+#   --apagar-trabalho                apaga os dados intermediários ao terminar
+```
+
+Na pasta de saída ficam `<nome>_ortomosaico.tif`, `<nome>_dem.tif`,
+`<nome>_relatorio.pdf`, `processamento.log` e `projeto.json` (que também
+abre no modo manual: menu Avançado → Etapas individuais).
+
+| Nível | Para quê | O que muda |
+|---|---|---|
+| Baixo | Visualização rápida | menos pontos-chave, nuvem densa leve, ortomosaico com pixel de 2x o GSD |
+| Médio | Mapeamento, restituição de linha | a configuração validada contra o Pix4D, pixel = GSD |
+| Alto | O mais completo | nuvem densa em resolução 2x maior (DEM/nuvem mais detalhados, bem mais lento) |
+
+## Uso — CLI etapa por etapa
 
 ```bash
 htrmapper import /caminho/para/imagens \
@@ -194,9 +243,12 @@ htrmapper checkpoints projeto.json --points pontos_rover.csv      # erro contra 
 htrmapper-gui
 ```
 
-No Windows, dá para abrir a GUI com um único duplo-clique em `run_gui.bat`
+Abre a tela do processamento automático; as etapas individuais ficam no
+menu Avançado. No Windows nativo (sem WSL), a nuvem densa não roda (o
+pycolmap do Windows não tem CUDA), então o processamento automático recusa
+começar e explica o motivo. No Windows, dá para abrir a GUI com um único duplo-clique em `run_gui.bat`
 (ou rodando `run_gui.bat` no `cmd`, dentro da pasta do projeto) — ele cria
-o `.venv` se ainda não existir, ativa e roda `pip install -e ".[gui,dev]"`
+o `.venv` se ainda não existir, ativa e roda `pip install -e ".[gui,cpu,dev]"`
 sempre (não só na primeira vez, para captar automaticamente uma
 dependência nova de uma fase mais recente num `.venv` criado antes dela —
 ex. `pycolmap` da Fase 2), antes de chamar `htrmapper-gui`. Depois de um
