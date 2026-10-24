@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 import pycolmap
-from PySide6.QtCore import QSettings, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QSettings, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -709,6 +709,8 @@ class AutoWindow(QMainWindow):
                 return
             self.worker.cancel()
             self.worker.wait()
+        if self.manual_window is not None:
+            self.manual_window.close()  # closing the main window ends the program
         event.accept()
 
 
@@ -717,7 +719,19 @@ def run(argv: list[str] | None = None) -> int:
     app.setApplicationName("HTRMapper")
     window = AutoWindow()
     window.show()
-    return app.exec()
+    code = app.exec()
+    # Destroy the windows while the application still exists. Left to the
+    # interpreter's shutdown, PySide destroys the QApplication first and
+    # then the widgets: "pure virtual method called" / segfault on every
+    # close (seen with PySide6 6.12), and a non-zero exit code that made the
+    # Windows shortcut report an error after a normal session.
+    window.settings.sync()
+    for widget in QApplication.topLevelWidgets():
+        widget.deleteLater()
+    del window
+    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    QApplication.processEvents()
+    return code
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -1176,7 +1176,14 @@ def run(argv: list[str] | None = None) -> int:
     app = QApplication(argv or sys.argv)
     window = MainWindow()
     window.show()
-    return app.exec()
+    code = app.exec()
+    # Destroy the widgets while the application exists (see gui.auto_window.run).
+    for widget in QApplication.topLevelWidgets():
+        widget.deleteLater()
+    del window
+    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    QApplication.processEvents()
+    return code
 
 
 if __name__ == "__main__":

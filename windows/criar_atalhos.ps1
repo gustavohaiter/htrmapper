@@ -14,13 +14,16 @@ Copy-Item -Force (Join-Path $PSScriptRoot "htrmapper.ico") (Join-Path $dest "htr
 $logWin = "\\wsl.localhost\$Distro\home\$WslUser\.local\share\htrmapper\gui.log"
 $vbs = @"
 ' Abre o HTRMapper (que roda dentro do WSL) sem mostrar terminal.
+' A saída do wsl.exe vai para atalho.log (nesta pasta), e a do programa
+' para gui.log, dentro do Linux.
 Option Explicit
-Dim sh, code
+Dim sh, code, shortcutLog
 Set sh = CreateObject("WScript.Shell")
-code = sh.Run("wsl.exe -d ""$Distro"" -- bash -lc ""~/.local/bin/htrmapper-abrir""", 0, True)
+shortcutLog = sh.ExpandEnvironmentStrings("%LOCALAPPDATA%") & "\HTRMapper\atalho.log"
+code = sh.Run("cmd.exe /s /c "" wsl.exe -d ""$Distro"" -- bash -lc ""~/.local/bin/htrmapper-abrir"" > """ & shortcutLog & """ 2>&1 """, 0, True)
 If code <> 0 Then
     MsgBox "O HTRMapper fechou com um erro (código " & code & ")." & vbCrLf & vbCrLf & _
-        "Veja o log em:" & vbCrLf & "$logWin", vbExclamation, "HTRMapper"
+        "Veja os logs em:" & vbCrLf & shortcutLog & vbCrLf & "$logWin", vbExclamation, "HTRMapper"
 End If
 "@
 # VBScript lê ANSI (Windows-1252): acentos certos tanto no PowerShell 5 quanto no 7.
