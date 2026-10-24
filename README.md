@@ -213,6 +213,20 @@ entrada já está em EPSG:31983 com resolução automática, os pixels são
 copiados 1:1 na mesma grade (sem reamostragem, sem deslocamento). Não usa
 nenhum módulo do HTRMapper; precisa só do Python do próprio QGIS.
 
+## Comparar com o Pix4D/Metashape
+
+`tools/comparar_ortomosaicos.py` mede, em centímetros, o deslocamento entre
+o nosso ortomosaico e o de outro programa (mesmo voo), por correlação de
+fase em janelas de 256 px numa grade de pontos (padrão: a cada 20 m):
+
+```bash
+python tools/comparar_ortomosaicos.py ortho_v5.tif ortho_pix4d.tif --saida pontos.geojson
+```
+
+Imprime mediana, RMSE, p95 e máximo do deslocamento em E/N, e os pontos
+com maior diferença; o GeoJSON abre direto no QGIS (campos `dE_cm`,
+`dN_cm`, `d2D_cm`).
+
 ## Testes
 
 Toda a suíte usa dados sintéticos (JPEGs com EXIF + XMP DJI fabricados em
