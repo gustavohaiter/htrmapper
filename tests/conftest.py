@@ -172,3 +172,25 @@ def synthetic_spec() -> SyntheticImageSpec:
 @pytest.fixture
 def synthetic_dji_image(tmp_path: Path, synthetic_spec: SyntheticImageSpec) -> Path:
     return make_synthetic_dji_jpeg(tmp_path / "DJI_0001.JPG", synthetic_spec)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _destroy_qt_windows_before_exit():
+    """Destroy the windows the GUI tests created while the QApplication
+    still exists. Left to the interpreter's shutdown, PySide destroys the
+    application first and then the widgets, and the test process crashes
+    on exit (segfault / "corrupted double-linked list") after every test
+    passed -- the same issue gui.auto_window.run() avoids in the program."""
+    yield
+    try:
+        from PySide6.QtCore import QEvent
+        from PySide6.QtWidgets import QApplication
+    except ImportError:
+        return
+    app = QApplication.instance()
+    if app is None:
+        return
+    for widget in QApplication.topLevelWidgets():
+        widget.deleteLater()
+    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    QApplication.processEvents()
