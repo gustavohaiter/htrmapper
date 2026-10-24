@@ -1736,9 +1736,25 @@ independente, projetando cada observação.
 
 ### Alinhamento em resolução cheia
 
-Já existia como `htrmapper align --max-image-size -1` (seção 13). Falta
-medir no voo real o ganho contra 2000 px antes de mudar o padrão, porque
-o align fica mais lento.
+Já existia como `htrmapper align --max-image-size -1` (seção 13). Medido
+no voo real da fazenda 20046 (56 fotos), ambos com a limpeza de tie points:
+
+| | 2000 px (padrão) | resolução cheia |
+|---|---|---|
+| Tie points após a limpeza | 62.306 | 59.361 |
+| Reprojeção final | 0,330 px | 0,326 px |
+| RMSE GNSS XY / Z / total | 2,88 / 0,98 / 3,04 cm | 2,79 / 1,02 / 2,97 cm |
+| Erro máximo | 6,15 cm | 6,06 cm |
+| Focal / cx / cy final (px) | 3724,73 / 2667,79 / 1959,61 | 3724,56 / 2667,71 / 1959,48 |
+
+A lente muda menos de 0,2 px (abaixo de 0,5 cm no chão) e o RMSE 0,7 mm:
+os dois já estão no piso do RTK (~2 cm), e o gargalo não é a precisão dos
+tie points. O padrão continua 2000 px, mais rápido.
+
+Na mesma comparação, o DSM do Pix4D do voo (EPSG:32723, elipsoidal) ficou
++0,29 m acima do `dem_v4` (mediana; desvio robusto 0,22 m). É compatível
+com a correlação focal × altura de voo só nadir sem pontos de controle,
+que não desloca o ortomosaico em XY: os dois ortomosaicos batem.
 
 ### Cota ortométrica (`geo.vertical`, `htrmapper orthometric`)
 
