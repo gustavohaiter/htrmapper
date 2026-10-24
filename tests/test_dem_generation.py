@@ -244,3 +244,21 @@ def test_grid_is_snapped_to_multiples_of_the_resolution(tmp_path: Path):
     _, _, _, transform = _read_dem(tmp_path / "dem.tif")
     assert transform.c / 0.5 == pytest.approx(round(transform.c / 0.5))
     assert transform.f / 0.5 == pytest.approx(round(transform.f / 0.5))
+
+
+def test_automatic_resolution_counts_only_the_covered_area(tmp_path: Path):
+    """An L-shaped field fills 5/8 of its bounding box. The cell must be 2x
+    the point spacing where there are points (10 pts/m2: 0.632 m, rounded
+    to 0.65 m), not inflated by the empty corner (the bounding box alone
+    gives 6.25 pts/m2 and 0.8 m)."""
+    rng = np.random.default_rng(3)
+    x = rng.uniform(0, 200, 400_000)
+    y = rng.uniform(0, 200, 400_000)
+    keep = (x < 100) | (y < 50)
+    x, y = x[keep], y[keep]
+    las = tmp_path / "l.las"
+    _write_points(las, x, y, 600 + 0.01 * x)
+    result = run_dem_generation(las, 31983, tmp_path / "dem.tif")
+    density = len(x) / (100 * 200 + 100 * 50)
+    assert density == pytest.approx(10.0, rel=0.01)
+    assert result.resolution_m == pytest.approx(0.65)

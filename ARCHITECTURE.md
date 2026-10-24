@@ -1920,3 +1920,33 @@ sobrescrevia o de CUDA a cada `pip install -e .`.
 puderam ser executados neste ambiente (Linux sem Windows nem PowerShell). O
 processamento, o relatório e a janela foram testados de ponta a ponta com o
 voo sintético, com a nuvem densa simulada (sem GPU aqui).
+
+## 32. Revisão completa de erros, gargalos e memória (antes do teste do processamento automático)
+
+Revisão módulo a módulo. Toda mudança que não deveria alterar o resultado
+foi conferida bit a bit contra a versão anterior.
+
+| Onde | Problema | Correção | Efeito medido |
+|---|---|---|---|
+| Ortomosaico | Gerava de antemão as coordenadas de todos os blocos (~67 MB cada): ~4,8 GB de RAM no voo de 56 fotos, dezenas de GB num voo grande | blocos gerados um por vez | memória constante |
+| Ortomosaico | Cada foto decodificada (~60 MB) ficava em memória até o fim (500 fotos ≈ 30 GB) | cache LRU limitado a 30% da RAM livre; ao passar para uma nova linha de blocos, descarta fotos cuja área fica toda ao norte dela | igual bit a bit, mesmo com cache de 1 foto |
+| Ortomosaico | Blocos de 2048 px: quase todas as fotos tocam o bloco inteiro e são testadas em todos os pixels | blocos de 512 px (múltiplo do bloco JPEG) | ~3x mais rápido, saída idêntica |
+| Ortomosaico | Projetava todos os pixels do bloco em cada foto | testa antes o ângulo de visada (barato, sem projeção) e projeta só os pixels em que a foto pode ganhar (supera a 2ª melhor vista); fotos mais próximas do centro do bloco primeiro | ~25% a menos, saída idêntica |
+| Ortomosaico | Cores interpoladas em todos os pixels visíveis | só onde a foto vira 1ª ou 2ª vista | — |
+| Ortomosaico | Projetava o DEM inteiro em cada foto para achar sua área no chão | DEM amostrado em até 256 por lado, com margem proporcional | — |
+| Nuvem densa | Cache do COLMAP com padrão de 32 GB (patch-match e fusão), acima da RAM de um PC de 16 GB; sem cache, a fusão carrega todos os mapas de uma vez (~45 MB/foto no "media") | caches limitados a 40% da RAM livre; a fusão passa a usar cache quando os mapas não cabem | protege voos grandes |
+| Nuvem densa | Exportação para LAS percorria milhões de pontos um a um em Python | lê o `fused.ply` (referencial local) de uma vez; a leitura cai no método antigo se o layout for outro ou se as coordenadas forem absolutas (float32 não serve para UTM) | diferença de 0,03 mm |
+| DEM | A resolução automática calculava a densidade sobre o retângulo envolvente, contando cantos vazios como cobertos (38% no voo real): célula maior que os "2x o espaçamento" especificados | densidade sobre a área realmente ocupada (células de 4x o espaçamento), arredondada a múltiplos de 5 cm | voo real: ~0,50 → ~0,40 m |
+| DEM | O filtro de picos crescia os buracos anel a anel, com uma convolução da grade inteira por anel | vizinho mais próximo numa única transformada de distância | mesma qualidade no benchmark; 19 → 15 s em 0,25 m |
+| Importação | Lia cada foto inteira (10–20 MB) só para achar o XMP, que fica nos primeiros KB | lê os primeiros 512 KB (e o resto só se o pacote continuar além) e lê as fotos em 8 threads (o disco do Windows no WSL tem latência alta) | — |
+| Importação | Os 4 TIFs multiespectrais do Mavic 3M (`_MS_G/R/RE/NIR.TIF`), gravados na mesma pasta, entrariam no mosaico RGB | ignorados e contados no relatório de importação | — |
+| Importação | Fotos ilegíveis eram contadas como "com posição válida"; campos XMP escritos como elemento (e não atributo) não eram lidos | corrigido | — |
+| Hardware | `detect_system_info` rodava `nvidia-smi` (um subprocesso, que já travou a interface quando chamado com o COLMAP rodando em outra thread) a cada estimativa, relatório e erro | detectado uma vez por processo, na abertura da janela | — |
+| Relatório | Resíduos calculados percorrendo todos os pontos-chave de cada foto | só as observações de pontos 3D | — |
+
+**Mantido de propósito**: as tolerâncias rígidas do ajuste. Com as do Ceres
+padrão, o ajuste fica ~2x mais rápido e as câmeras mudam no máximo 0,2 mm
+(medido num voo sintético de 24 fotos). Mas o ajuste é ~4% do tempo total
+(a nuvem densa domina) e essa é a configuração validada contra o Pix4D. O
+COLMAP também grava as fotos desdistorcidas com JPEG ~98, sem perda de cor
+para o ortomosaico (conferido pelas tabelas de quantização).

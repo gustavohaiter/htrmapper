@@ -98,3 +98,25 @@ def test_short_summary_empty_folder():
     report = ImportReport(total_images=0)
 
     assert "Nenhuma imagem" in report.short_summary()
+
+
+def test_mavic3m_multispectral_bands_are_left_out(tmp_path: Path):
+    """The Mavic 3M writes its four multispectral TIFs next to the RGB
+    JPGs; they are another camera and must not enter an RGB mosaic."""
+    rgb = make_synthetic_dji_jpeg(tmp_path / "DJI_20260619101057_0001_D.JPG", SyntheticImageSpec())
+    for band in ("G", "R", "RE", "NIR"):
+        (tmp_path / f"DJI_20260619101057_0001_MS_{band}.TIF").write_bytes(b"II*\0")
+    (tmp_path / "foto.tif").write_bytes(b"II*\0")  # an ordinary TIFF stays
+
+    assert [p.name for p in find_images(tmp_path)] == [rgb.name, "foto.tif"]
+    records, report = import_folder(tmp_path)
+    assert report.multispectral_ignored == 4
+    assert any("Multispectral bands ignored" in line for line in report.summary_lines())
+
+
+def test_unreadable_files_are_not_counted_as_valid(tmp_path: Path):
+    make_synthetic_dji_jpeg(tmp_path / "ok.jpg", SyntheticImageSpec())
+    (tmp_path / "quebrada.jpg").write_bytes(b"not a jpeg")
+    records, report = import_folder(tmp_path)
+    assert len(records) == 1 and "quebrada.jpg" in report.errors
+    assert report.num_with_valid_position == 1

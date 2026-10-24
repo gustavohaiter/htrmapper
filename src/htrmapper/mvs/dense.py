@@ -144,25 +144,82 @@ def _translated(reconstruction: "pycolmap.Reconstruction", translation: np.ndarr
     return reconstruction
 
 
+_PLY_TYPES = {
+    "char": "i1", "int8": "i1", "uchar": "u1", "uint8": "u1", "short": "i2", "int16": "i2",
+    "ushort": "u2", "uint16": "u2", "int": "i4", "int32": "i4", "uint": "u4", "uint32": "u4",
+    "float": "f4", "float32": "f4", "double": "f8", "float64": "f8",
+}
+
+
+def _read_ply_points(path: Path) -> tuple[np.ndarray, np.ndarray] | None:
+    """(xyz float64, rgb uint8) straight from a binary little-endian PLY
+    such as COLMAP's fused.ply, in one read. None if the file is missing or
+    in any other layout (the caller then walks the reconstruction)."""
+    try:
+        with open(path, "rb") as f:
+            if f.readline().strip() != b"ply":
+                return None
+            fields, count, in_vertex = [], 0, False
+            for raw in iter(f.readline, b""):
+                words = raw.decode("ascii", errors="replace").split()
+                if not words:
+                    continue
+                if words[0] == "format" and words[1] != "binary_little_endian":
+                    return None
+                if words[0] == "element":
+                    in_vertex = words[1] == "vertex"
+                    if in_vertex:
+                        count = int(words[2])
+                    elif count:
+                        return None  # other elements after the vertices: not the simple layout
+                elif words[0] == "property" and in_vertex:
+                    if words[1] == "list" or words[1] not in _PLY_TYPES:
+                        return None
+                    fields.append((words[2], "<" + _PLY_TYPES[words[1]]))
+                elif words[0] == "end_header":
+                    break
+            names = {name for name, _ in fields}
+            if not {"x", "y", "z", "red", "green", "blue"} <= names:
+                return None
+            data = np.fromfile(f, dtype=np.dtype(fields), count=count)
+    except (OSError, ValueError):
+        return None
+    if data.size != count:
+        return None
+    xyz = np.column_stack([data["x"], data["y"], data["z"]]).astype(np.float64)
+    rgb = np.column_stack([data["red"], data["green"], data["blue"]]).astype(np.uint8)
+    return xyz, rgb
+
+
 def _export_to_las(
     reconstruction: "pycolmap.Reconstruction",
     project_epsg: int,
     las_path: Path,
     offset: np.ndarray | None = None,
-) -> None:
-    xyz = []
-    rgb = []
-    for point in reconstruction.points3D.values():
-        xyz.append(point.xyz)
-        rgb.append(point.color)
+    ply_path: Path | None = None,
+) -> int:
+    """Write the dense cloud as LAS; returns the number of points. Reads
+    the fused PLY directly when given (millions of points in one read; the
+    per-point walk over the reconstruction takes tens of seconds)."""
+    points = _read_ply_points(ply_path) if ply_path is not None else None
+    # The PLY stores float32: exact enough only in the local frame (values
+    # of hundreds of meters), never for absolute UTM coordinates.
+    local = points is not None and len(points[0]) and np.abs(points[0]).max() < 1e5
+    if local and len(points[0]) == len(reconstruction.points3D):
+        xyz_arr, rgb_arr = points
+    else:
+        xyz_list, rgb_list = [], []
+        for point in reconstruction.points3D.values():
+            xyz_list.append(point.xyz)
+            rgb_list.append(point.color)
+        xyz_arr = np.array(xyz_list, dtype=np.float64).reshape(-1, 3)
+        rgb_arr = np.array(rgb_list, dtype=np.uint8).reshape(-1, 3)
 
-    if not xyz:
+    if len(xyz_arr) == 0:
         raise MvsError("stereo fusion produced zero points; cannot export an empty point cloud")
 
-    xyz_arr = np.array(xyz, dtype=np.float64)
     if offset is not None:
-        xyz_arr += np.asarray(offset, dtype=np.float64)
-    rgb_arr = np.array(rgb, dtype=np.uint8)
+        xyz_arr = xyz_arr + np.asarray(offset, dtype=np.float64)
 
     header = laspy.LasHeader(point_format=7, version="1.4")
     header.add_crs(CoordinateReferenceSystem(project_epsg).proj_crs)
@@ -183,6 +240,15 @@ def _export_to_las(
 
     las_path.parent.mkdir(parents=True, exist_ok=True)
     las.write(las_path)
+    return len(xyz_arr)
+
+
+def _memory_budget_gb(fraction: float = 0.4) -> float:
+    """Share of the currently free RAM COLMAP's dense caches may use. Its
+    default is 32 GB each, more than a 16 GB PC has."""
+    import psutil
+
+    return max(1.0, psutil.virtual_memory().available * fraction / 1024**3)
 
 
 def run_dense_reconstruction(
@@ -276,6 +342,8 @@ def run_dense_reconstruction(
         options.filter_min_triangulation_angle = config.filter_min_triangulation_angle
     if config.filter_min_ncc is not None:
         options.filter_min_ncc = config.filter_min_ncc
+    budget_gb = _memory_budget_gb()
+    options.cache_size = min(options.cache_size, budget_gb)
 
     _report("Patch-match stereo (GPU)")
     pycolmap.patch_match_stereo(
@@ -285,6 +353,16 @@ def run_dense_reconstruction(
     input_type = "geometric" if preset["geom_consistency"] else "photometric"
     fused_path = workdir / "fused.ply"
     fusion_options = pycolmap.StereoFusionOptions()
+    # Without the cache, fusion loads every photo's image, depth and normal
+    # maps up front (~45 MB per photo at "media"): fine for 56 photos, out
+    # of memory for a few hundred. Stream them through a bounded cache when
+    # they would not fit.
+    side = preset["max_image_size"] if preset["max_image_size"] > 0 else 5280
+    estimated_gb = reconstruction.num_reg_images() * side * side * 0.75 * 23 / 1024**3
+    if estimated_gb > budget_gb:
+        fusion_options.use_cache = True
+        fusion_options.cache_size = budget_gb
+        logger.info("stereo fusion streams maps through a %.1f GB cache (%.1f GB would not fit)", budget_gb, estimated_gb)
     _report("Fusão estéreo")
     dense_reconstruction = pycolmap.stereo_fusion(
         output_path=fused_path,
@@ -305,10 +383,12 @@ def run_dense_reconstruction(
     _report("Exportando nuvem de pontos (LAS)")
     # The reconstruction lives in the project CRS and nothing here reprojects
     # it, so that is the CRS the LAS must declare (ARCHITECTURE.md section 28).
-    _export_to_las(dense_reconstruction, project.crs.project_epsg, las_path, offset=local_origin)
+    num_points = _export_to_las(
+        dense_reconstruction, project.crs.project_epsg, las_path, offset=local_origin, ply_path=fused_path
+    )
 
     return MvsResult(
-        num_points=len(dense_reconstruction.points3D),
+        num_points=num_points,
         quality=config.quality,
         point_cloud_las_path=str(las_path),
         point_cloud_native_path=str(fused_path),

@@ -378,3 +378,47 @@ def test_dem_nodata_cells_seen_by_cameras_still_get_mosaic_pixels(tmp_path: Path
     holed = run_orthomosaic_generation(reconstruction_path, images_dir, holed_dem, tmp_path / "holed.tif")
 
     assert holed.num_valid_pixels == full.num_valid_pixels
+
+
+def test_photo_cache_limit_and_footprint_sampling_never_change_the_output(tmp_path: Path, monkeypatch):
+    """Memory limits are implementation details: a cache holding a single
+    decoded photo (every photo reloaded and dropped as tiles move on) and a
+    footprint found on a heavily subsampled DEM give the same raster."""
+    import htrmapper.ortho.orthomosaic as orthomosaic_module
+
+    spec, terrain, images_dir, reconstruction_path, dem_path = _setup_ground_truth_scene(tmp_path)
+    monkeypatch.setattr(orthomosaic_module, "TILE_SIZE_PX", 16)
+    reference = run_orthomosaic_generation(reconstruction_path, images_dir, dem_path, tmp_path / "ref.tif")
+
+    original_init = orthomosaic_module._ImageCache.__init__
+
+    def one_photo(self, bytes_per_image, memory_fraction=0.3, minimum=8):
+        original_init(self, bytes_per_image, memory_fraction, minimum)
+        self.capacity = 1
+
+    monkeypatch.setattr(orthomosaic_module._ImageCache, "__init__", one_photo)
+    monkeypatch.setattr(orthomosaic_module, "FOOTPRINT_SAMPLE_SIDE", 4)
+    constrained = run_orthomosaic_generation(reconstruction_path, images_dir, dem_path, tmp_path / "lim.tif")
+
+    with rasterio.open(reference.raster_path) as a, rasterio.open(constrained.raster_path) as b:
+        assert np.array_equal(a.read(), b.read())
+        assert np.array_equal(a.dataset_mask(), b.dataset_mask())
+
+
+def test_image_cache_evicts_least_recently_used(tmp_path: Path):
+    from htrmapper.ortho.orthomosaic import _ImageCache
+
+    paths = []
+    for i in range(3):
+        path = tmp_path / f"{i}.png"
+        PILImage.new("RGB", (4, 4), (i, i, i)).save(path)
+        paths.append(path)
+    cache = _ImageCache(bytes_per_image=48)
+    cache.capacity = 2
+    cache.get(0, paths[0])
+    cache.get(1, paths[1])
+    cache.get(0, paths[0])  # 0 is now the most recent
+    cache.get(2, paths[2])  # evicts 1
+    assert list(cache._images) == [0, 2]
+    cache.drop(0)
+    assert list(cache._images) == [2]

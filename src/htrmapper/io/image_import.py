@@ -9,6 +9,8 @@ spending compute on alignment.
 
 from __future__ import annotations
 
+import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -35,11 +37,15 @@ class ImportReport:
     max_longitude: float | None = None
     images_with_rtk_std_dev: int = 0
     errors: dict[str, str] = field(default_factory=dict)  # file -> error message
+    multispectral_ignored: int = 0  # DJI Mavic 3M _MS_*.TIF bands left out
 
     @property
     def num_with_valid_position(self) -> int:
-        return self.total_images - len(self.images_without_position) - len(
-            self.images_with_invalid_position
+        return (
+            self.total_images
+            - len(self.errors)
+            - len(self.images_without_position)
+            - len(self.images_with_invalid_position)
         )
 
     @property
@@ -98,6 +104,10 @@ class ImportReport:
             f"Images with per-image RTK std-dev metadata: {self.images_with_rtk_std_dev}",
             f"Camera models detected: {sorted(self.camera_models) or 'none'}",
         ]
+        if self.multispectral_ignored:
+            lines.append(
+                f"Multispectral bands ignored (DJI _MS_*.TIF, not part of the RGB mosaic): {self.multispectral_ignored}"
+            )
         if self.min_altitude is not None:
             lines.append(f"Altitude range (GPS, m): {self.min_altitude:.1f} .. {self.max_altitude:.1f}")
         if self.min_latitude is not None:
@@ -112,11 +122,30 @@ class ImportReport:
         return lines
 
 
+# The Mavic 3M saves its four multispectral bands (DJI_..._MS_G.TIF,
+# _MS_R, _MS_RE, _MS_NIR; 1.4 MP, 16-bit, another camera) in the same folder
+# as the RGB photos (DJI_..._D.JPG). They are not part of an RGB mosaic.
+_DJI_MULTISPECTRAL = re.compile(r"_MS_(G|R|RE|NIR)\.TIFF?$", re.IGNORECASE)
+
+
+def is_dji_multispectral(path: Path) -> bool:
+    return bool(_DJI_MULTISPECTRAL.search(Path(path).name))
+
+
 def find_images(folder: Path) -> list[Path]:
     folder = Path(folder)
     return sorted(
-        p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS
+        p
+        for p in folder.iterdir()
+        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS and not is_dji_multispectral(p)
     )
+
+
+def count_multispectral(folder: Path) -> int:
+    try:
+        return sum(1 for p in Path(folder).iterdir() if p.is_file() and is_dji_multispectral(p))
+    except OSError:
+        return 0
 
 
 def build_image_record(image_path: Path) -> ImageRecord:
@@ -175,15 +204,24 @@ def import_folder(folder: Path) -> tuple[list[ImageRecord], ImportReport]:
     """Scan a folder for supported images and build records + a quality report."""
     image_paths = find_images(folder)
     records: list[ImageRecord] = []
-    report = ImportReport(total_images=len(image_paths))
+    report = ImportReport(total_images=len(image_paths), multispectral_ignored=count_multispectral(folder))
 
-    for image_path in image_paths:
+    def read_one(image_path: Path) -> ImageRecord | Exception:
         try:
-            record = build_image_record(image_path)
+            return build_image_record(image_path)
         except Exception as exc:  # noqa: BLE001 - we want to record and continue, not abort the batch
-            report.errors[image_path.name] = str(exc)
-            continue
+            return exc
 
+    # Reading metadata is I/O-bound; a few threads hide the per-file latency
+    # (large from a Windows drive in WSL). Results keep the sorted order.
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        outcomes = list(pool.map(read_one, image_paths))
+
+    for image_path, outcome in zip(image_paths, outcomes):
+        if isinstance(outcome, Exception):
+            report.errors[image_path.name] = str(outcome)
+            continue
+        record = outcome
         records.append(record)
 
         if not record.position_valid:

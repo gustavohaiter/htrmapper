@@ -63,6 +63,7 @@ turn transparent and the empty border would turn into a gray frame.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from math import radians
@@ -79,12 +80,15 @@ from rasterio.windows import Window
 from scipy import ndimage
 from scipy.interpolate import RegularGridInterpolator
 
-# Processing tile side, in output pixels. Bounds per-tile memory (the
-# largest per-tile arrays are a few hundred MB) regardless of total output
-# size. Must stay a multiple of OUTPUT_BLOCK_PX, so every JPEG block of the
-# output file is written exactly once (a block written in two halves would
-# be decompressed and recompressed, losing quality twice).
-TILE_SIZE_PX = 2048
+# Processing tile side, in output pixels. Small tiles are much faster: a
+# camera whose footprint box touches a tile is tested on every pixel of it,
+# and with tiles much smaller than a photo's footprint (5280 px wide at the
+# GSD) most cameras touch only the tiles they really cover. Measured on a
+# synthetic flight with the same footprint/tile ratio: ~3x faster than 2048
+# px tiles, same output. Must stay a multiple of OUTPUT_BLOCK_PX, so every
+# JPEG block of the output file is written exactly once (a block written in
+# two halves would be decompressed and recompressed, losing quality twice).
+TILE_SIZE_PX = 512
 
 # GeoTIFF internal tile size: 512x512 is the modern GDAL/COG default and
 # what the user's QGIS optimizer script uses.
@@ -282,30 +286,68 @@ def _build_dem_interpolator(
     )
 
 
-def _camera_footprint_bbox(
-    image: "pycolmap.Image", dem_world_x: np.ndarray, dem_world_y: np.ndarray, dem_elevation: np.ndarray
-) -> tuple[float, float, float, float] | None:
+FOOTPRINT_SAMPLE_SIDE = 256
+
+
+def _footprint_sample_points(
+    dem_world_x: np.ndarray, dem_world_y: np.ndarray, dem_elevation: np.ndarray
+) -> tuple[np.ndarray, int]:
+    """DEM terrain points used to find each camera's footprint: the DEM grid
+    subsampled to at most FOOTPRINT_SAMPLE_SIDE per side (a big DEM projected
+    whole through every camera would dominate the run for nothing), plus the
+    subsampling step, which widens the footprint margin accordingly."""
+    step = max(1, int(np.ceil(max(dem_elevation.shape) / FOOTPRINT_SAMPLE_SIDE)))
+    zs = dem_elevation[::step, ::step]
+    valid = ~np.isnan(zs)
+    points = np.stack([dem_world_x[::step, ::step][valid], dem_world_y[::step, ::step][valid], zs[valid]], axis=1)
+    return points, step
+
+
+def _camera_footprint_bbox(image: "pycolmap.Image", world_points: np.ndarray) -> tuple[float, float, float, float] | None:
     """Approximate world-space bounding box (min_x, max_x, min_y, max_y) of
-    a camera's ground footprint, by projecting the DEM's own small grid
-    through it. Only a cheap per-tile pre-filter, never the final
+    a camera's ground footprint, by projecting the sampled DEM terrain
+    points through it. Only a cheap per-tile pre-filter, never the final
     per-pixel test. None if the camera sees no DEM terrain at all."""
-    valid_terrain = ~np.isnan(dem_elevation)
-    if not np.any(valid_terrain):
+    if world_points.size == 0:
         return None
-
-    xs = dem_world_x[valid_terrain]
-    ys = dem_world_y[valid_terrain]
-    zs = dem_elevation[valid_terrain]
-    world_points = np.stack([xs, ys, zs], axis=1)
-
     camera = image.camera
     cam_points = image.cam_from_world() * world_points
     u, v = _array_index_coords(camera.img_from_cam(cam_points, check_cheirality=True))
     valid = ~np.isnan(u) & (u >= 0) & (u <= camera.width - 1) & (v >= 0) & (v <= camera.height - 1)
     if not np.any(valid):
         return None
+    xs, ys = world_points[valid, 0], world_points[valid, 1]
+    return float(xs.min()), float(xs.max()), float(ys.min()), float(ys.max())
 
-    return float(xs[valid].min()), float(xs[valid].max()), float(ys[valid].min()), float(ys[valid].max())
+
+class _ImageCache:
+    """Decoded undistorted photos, least-recently-used first out, capped by
+    memory: a full-resolution 20 MP photo is ~60 MB decoded, so keeping
+    every photo of a large flight would exhaust the RAM. Tiles run row by
+    row, north to south, so photos are also dropped as soon as the rows
+    still to come are all south of their footprint."""
+
+    def __init__(self, bytes_per_image: int, memory_fraction: float = 0.3, minimum: int = 8):
+        import psutil
+
+        budget = psutil.virtual_memory().available * memory_fraction
+        self.capacity = max(minimum, int(budget // max(1, bytes_per_image)))
+        self._images: OrderedDict[int, np.ndarray] = OrderedDict()
+
+    def get(self, image_id: int, path: Path) -> np.ndarray:
+        image = self._images.get(image_id)
+        if image is None:
+            with PILImage.open(path) as pil:
+                image = np.asarray(pil.convert("RGB"))
+            self._images[image_id] = image
+            while len(self._images) > self.capacity:
+                self._images.popitem(last=False)
+        else:
+            self._images.move_to_end(image_id)
+        return image
+
+    def drop(self, image_id: int) -> None:
+        self._images.pop(image_id, None)
 
 
 def _bbox_overlaps(
@@ -416,14 +458,16 @@ def run_orthomosaic_generation(
     width_px, height_px, transform = _output_geometry(dem_transform, dem_width_px, dem_height_px, resolution_m)
     interpolator = _build_dem_interpolator(dem_transform, dem_width_px, dem_height_px, dem_elevation)
 
-    dem_cell_diag = float(np.hypot(abs(dem_transform.a), abs(dem_transform.e)))
+    footprint_points, footprint_step = _footprint_sample_points(dem_world_x, dem_world_y, dem_elevation)
+    dem_cell_diag = float(np.hypot(abs(dem_transform.a), abs(dem_transform.e))) * footprint_step
+    del dem_world_x, dem_world_y
     cameras: list[dict] = []
     for image_id in registered_ids:
         image = reconstruction.image(image_id)
         image_path = undistorted_image_path / image.name
         if not image_path.exists():
             continue
-        bbox = _camera_footprint_bbox(image, dem_world_x, dem_world_y, dem_elevation)
+        bbox = _camera_footprint_bbox(image, footprint_points)
         if bbox is None:
             continue
         cameras.append(
@@ -434,15 +478,19 @@ def run_orthomosaic_generation(
                 "center": np.asarray(image.projection_center(), dtype=np.float64),
                 "image_path": image_path,
                 "bbox": bbox,
-                "cache": None,  # lazily holds the decoded (H, W, 3) uint8 array
             }
         )
+    image_cache = _ImageCache(
+        max((c["camera"].width * c["camera"].height * 3 for c in cameras), default=1)
+    )
 
     max_angle_rad = radians(config.max_view_angle_deg) if config.max_view_angle_deg is not None else None
     seam_rad = radians(SEAM_BLEND_DEG)
 
-    tile_specs = list(_iter_tiles(width_px, height_px, transform, TILE_SIZE_PX))
-    num_tiles_total = len(tile_specs)
+    # Generated one at a time: each tile's coordinate grids are ~67 MB, and
+    # materializing all of them up front cost gigabytes of RAM.
+    num_tiles_total = -(-height_px // TILE_SIZE_PX) * -(-width_px // TILE_SIZE_PX)
+    current_row_off = -1
     num_valid_pixels = 0
     num_nodata_pixels = 0
     used_camera_ids: set[int] = set()
@@ -476,10 +524,18 @@ def run_orthomosaic_generation(
         bigtiff="IF_SAFER",
     ) as dst:
         for tile_index, (row_off, col_off, tile_height, tile_width, tile_world_x, tile_world_y) in enumerate(
-            tile_specs, start=1
+            _iter_tiles(width_px, height_px, transform, TILE_SIZE_PX), start=1
         ):
             if cancellation_token is not None and cancellation_token.is_cancelled:
                 raise InterruptedError("Operation cancelled")
+            if row_off != current_row_off:
+                # New row of tiles: photos whose footprint lies entirely north
+                # of it are not needed any more.
+                current_row_off = row_off
+                row_top_y = transform.f + transform.e * row_off
+                for entry in cameras:
+                    if entry["bbox"][2] - dem_cell_diag > row_top_y:
+                        image_cache.drop(entry["image_id"])
 
             num_pixels = tile_height * tile_width
             tile_query = np.stack([tile_world_y.ravel(), tile_world_x.ravel()], axis=1)
@@ -507,12 +563,23 @@ def run_orthomosaic_generation(
                     float(world_points[:, 1].max()),
                 )
 
-                for entry in cameras:
-                    if not _bbox_overlaps(entry["bbox"], tile_bbox, margin=dem_cell_diag):
+                tile_center = np.array([(tile_bbox[0] + tile_bbox[1]) / 2, (tile_bbox[2] + tile_bbox[3]) / 2])
+                overlapping = [e for e in cameras if _bbox_overlaps(e["bbox"], tile_bbox, margin=dem_cell_diag)]
+                # Nearest (most nadir) photos first: they win most pixels, so the
+                # angle test below lets the later ones skip most of the tile.
+                overlapping.sort(key=lambda e: float(np.hypot(*(e["center"][:2] - tile_center))))
+                for entry in overlapping:
+                    offsets = world_points - entry["center"]
+                    score_all = -np.arctan2(np.hypot(offsets[:, 0], offsets[:, 1]), -offsets[:, 2])
+                    # A photo can only change a pixel whose second-best view it
+                    # beats (the condition applied below), and the view angle
+                    # needs no projection: project only those pixels.
+                    candidates = np.flatnonzero(score_all > best2[terrain_idx])
+                    if candidates.size == 0:
                         continue
 
                     camera = entry["camera"]
-                    cam_points = entry["image"].cam_from_world() * world_points
+                    cam_points = entry["image"].cam_from_world() * world_points[candidates]
                     u, v = _array_index_coords(camera.img_from_cam(cam_points, check_cheirality=True))
                     visible = (
                         ~np.isnan(u)
@@ -524,30 +591,32 @@ def run_orthomosaic_generation(
                     if not np.any(visible):
                         continue
 
-                    offsets = world_points[visible] - entry["center"]
-                    score = -np.arctan2(np.hypot(offsets[:, 0], offsets[:, 1]), -offsets[:, 2])
-                    idx = terrain_idx[visible]
+                    score = score_all[candidates[visible]]
+                    idx = terrain_idx[candidates[visible]]
 
                     becomes_first = score > best1[idx]
                     becomes_second = ~becomes_first & (score > best2[idx])
                     if not (np.any(becomes_first) or np.any(becomes_second)):
                         continue
 
-                    if entry["cache"] is None:
-                        entry["cache"] = np.asarray(PILImage.open(entry["image_path"]).convert("RGB"))
-                    colors = _bilinear_sample(entry["cache"], u[visible], v[visible])
+                    # Colors only where this photo wins a place (most visible
+                    # pixels are already better served by an earlier photo).
+                    take = becomes_first | becomes_second
+                    photo = image_cache.get(entry["image_id"], entry["image_path"])
+                    colors = _bilinear_sample(photo, u[visible][take], v[visible][take])
+                    first_in_take = becomes_first[take]
 
                     first = idx[becomes_first]
                     best2[first] = best1[first]
                     color2[first] = color1[first]
                     camera2[first] = camera1[first]
                     best1[first] = score[becomes_first]
-                    color1[first] = colors[becomes_first]
+                    color1[first] = colors[first_in_take]
                     camera1[first] = entry["image_id"]
 
                     second = idx[becomes_second]
                     best2[second] = score[becomes_second]
-                    color2[second] = colors[becomes_second]
+                    color2[second] = colors[~first_in_take]
                     camera2[second] = entry["image_id"]
 
             has_data = np.isfinite(best1)

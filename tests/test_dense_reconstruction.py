@@ -272,3 +272,68 @@ def test_raises_with_clear_message_when_no_cuda(tmp_path: Path):
 
     with pytest.raises(MvsError, match="CUDA"):
         run_dense_reconstruction(project, reconstruction_path, tmp_path / "images", tmp_path / "work")
+
+
+def test_las_export_reads_the_fused_ply_directly(tmp_path: Path):
+    """The fused PLY (local frame) is read in one go instead of walking
+    millions of points; same coordinates and colors as the walk."""
+    import laspy
+    import pycolmap
+
+    from htrmapper.mvs.dense import _local_origin, _read_ply_points, _translated
+
+    project, reconstruction_path = _aligned_project(tmp_path)
+    local = pycolmap.Reconstruction(str(reconstruction_path))
+    origin = _local_origin(local)
+    _translated(local, -origin)
+    ply = tmp_path / "fused.ply"
+    local.export_PLY(str(ply))
+    xyz, rgb = _read_ply_points(ply)
+    walked = np.array([p.xyz for p in local.points3D.values()])
+    assert np.abs(xyz - walked).max() < 1e-4
+    assert np.array_equal(rgb, np.array([p.color for p in local.points3D.values()]))
+
+    count = _export_to_las(local, 31983, tmp_path / "a.las", offset=origin, ply_path=ply)
+    las = laspy.read(tmp_path / "a.las")
+    assert count == len(las.x) == len(walked)
+    assert np.abs(np.column_stack([las.x, las.y, las.z]) - (walked + origin)).max() < 1e-3
+
+    absolute = pycolmap.Reconstruction(str(reconstruction_path))  # float32 PLY of UTM values: not used
+    absolute.export_PLY(str(tmp_path / "abs.ply"))
+    _export_to_las(absolute, 31983, tmp_path / "b.las", ply_path=tmp_path / "abs.ply")
+    las_b = laspy.read(tmp_path / "b.las")
+    exact = np.array([p.xyz for p in absolute.points3D.values()])
+    assert np.abs(np.column_stack([las_b.x, las_b.y, las_b.z]) - exact).max() < 1e-3
+
+
+def test_read_ply_points_rejects_unknown_layouts(tmp_path: Path):
+    from htrmapper.mvs.dense import _read_ply_points
+
+    ascii_ply = tmp_path / "ascii.ply"
+    ascii_ply.write_text("ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nend_header\n0\n")
+    assert _read_ply_points(ascii_ply) is None
+    assert _read_ply_points(tmp_path / "missing.ply") is None
+
+
+def test_dense_caches_are_bounded_by_the_free_memory(tmp_path: Path, monkeypatch):
+    import pycolmap
+
+    import htrmapper.mvs.dense as dense
+
+    project, reconstruction_path = _aligned_project(tmp_path)
+    monkeypatch.setattr(pycolmap, "has_cuda", True)
+    monkeypatch.setattr(dense, "_memory_budget_gb", lambda fraction=0.4: 1e-6)
+    seen = {}
+
+    def spy_patch_match(*args, **kwargs):
+        seen["pm_cache"] = kwargs["options"].cache_size
+
+    def spy_fusion(*args, **kwargs):
+        seen["fusion"] = (kwargs["options"].use_cache, kwargs["options"].cache_size)
+        return pycolmap.Reconstruction(str(Path(kwargs["workspace_path"]) / "sparse"))
+
+    monkeypatch.setattr(pycolmap, "patch_match_stereo", spy_patch_match)
+    monkeypatch.setattr(pycolmap, "stereo_fusion", spy_fusion)
+    run_dense_reconstruction(project, reconstruction_path, tmp_path / "images", tmp_path / "dense", MvsConfig())
+    assert seen["pm_cache"] == pytest.approx(1e-6)
+    assert seen["fusion"] == (True, pytest.approx(1e-6))

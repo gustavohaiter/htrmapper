@@ -10,6 +10,7 @@ module and fall back to CPU when no compatible GPU is found).
 
 from __future__ import annotations
 
+import functools
 import platform
 import subprocess
 from dataclasses import dataclass
@@ -123,7 +124,13 @@ def _detect_nvidia_gpus() -> tuple[GpuInfo, ...]:
     return tuple(gpus)
 
 
+@functools.lru_cache(maxsize=1)
 def detect_system_info() -> SystemInfo:
+    """Detected once per process: the hardware does not change while the
+    program runs, and every call spawns nvidia-smi, which must not happen
+    while a pipeline stage is running in another thread (see
+    `sample_live_usage`). The automatic processing calls it at start-up,
+    for the time estimate, the report and the error file."""
     return SystemInfo(
         os_name=f"{platform.system()} {platform.release()}",
         cpu_name=_detect_cpu_name(),

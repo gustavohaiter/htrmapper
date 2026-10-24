@@ -88,12 +88,17 @@ def extract_xmp_packet(image_bytes: bytes) -> str | None:
 
 
 def _find_attr(root: ET.Element, local_name: str) -> str | None:
-    """Find an attribute by local name (namespace-agnostic) anywhere in the XMP tree."""
+    """Find a field by local name (namespace-agnostic) anywhere in the XMP
+    tree: as an attribute (how DJI writes it) or as an element's text (the
+    other form RDF allows, used by some editors that rewrite the XMP)."""
     for elem in root.iter():
         for attr_name, attr_value in elem.attrib.items():
             # attr_name is "{namespace}LocalName" once parsed by ElementTree.
             if attr_name.endswith("}" + local_name) or attr_name == local_name:
                 return attr_value
+    for elem in root.iter():
+        if (elem.tag.endswith("}" + local_name) or elem.tag == local_name) and elem.text and elem.text.strip():
+            return elem.text.strip()
     return None
 
 
@@ -130,9 +135,18 @@ def parse_dji_xmp(xmp_text: str) -> DjiXmpData:
     )
 
 
+# The XMP packet sits in an APP1 segment near the start of the file (a few
+# KB into a DJI JPEG); reading the whole 10-20 MB photo just to find it cost
+# most of the import time, above all from a Windows drive in WSL.
+XMP_SEARCH_BYTES = 512 * 1024
+
+
 def read_dji_xmp(image_path: Path) -> DjiXmpData:
     """Read and parse DJI XMP metadata from a JPEG file. Returns empty data if absent."""
-    data = image_path.read_bytes()
+    with open(image_path, "rb") as f:
+        data = f.read(XMP_SEARCH_BYTES)
+        if data.find(_XMP_START) != -1 and data.find(_XMP_END, data.find(_XMP_START)) == -1:
+            data += f.read()  # packet starts in the head but ends further on
     packet = extract_xmp_packet(data)
     if packet is None:
         return DjiXmpData()

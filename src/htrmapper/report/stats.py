@@ -97,11 +97,10 @@ def _residual_grid(reconstruction, cells: int = 12) -> tuple[tuple, tuple[int, i
         image = reconstruction.image(image_id)
         if image.camera_id != cameras[0].camera_id:
             continue
-        observed, xyz = [], []
-        for point2d in image.points2D:
-            if point2d.has_point3D():
-                observed.append(point2d.xy)
-                xyz.append(reconstruction.points3D[point2d.point3D_id].xyz)
+        # Only the keypoints that became a tie point (a fraction of all).
+        observations = image.get_observation_points2D()
+        observed = [p.xy for p in observations]
+        xyz = [reconstruction.points3D[p.point3D_id].xyz for p in observations]
         if not observed:
             continue
         observed = np.asarray(observed)

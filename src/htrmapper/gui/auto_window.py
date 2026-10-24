@@ -183,6 +183,11 @@ class AutoWindow(QMainWindow):
         self.resize(1250, 820)
         self.setStyleSheet(_STYLESHEET)
         self.settings = QSettings("HTRMapper", "HTRMapper")
+        # Detect the hardware now, on the GUI thread before any processing
+        # thread exists (it spawns nvidia-smi; cached afterwards).
+        from htrmapper.core.system_info import detect_system_info
+
+        detect_system_info()
         self.worker: AutoWorker | None = None
         self.manual_window = None
         self.num_photos = 0

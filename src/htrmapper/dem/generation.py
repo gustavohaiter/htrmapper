@@ -172,11 +172,24 @@ def _filter_outliers(x: np.ndarray, y: np.ndarray, z: np.ndarray) -> tuple[np.nd
 
 
 def _auto_resolution(x: np.ndarray, y: np.ndarray) -> float:
-    area_m2 = (x.max() - x.min()) * (y.max() - y.min())
-    if area_m2 <= 0 or len(x) == 0:
+    """AUTO_RESOLUTION_SPACING_FACTOR x the mean point spacing over the area
+    the points actually cover. The bounding box alone counts the empty
+    corners of an irregular field as covered (38% of it on the fazenda
+    20046 flight), which coarsens the cell well beyond the intended
+    factor; occupancy is measured on cells of 4x the bounding-box spacing
+    (about 16 points each where there is data)."""
+    bbox_area_m2 = (x.max() - x.min()) * (y.max() - y.min())
+    if bbox_area_m2 <= 0 or len(x) == 0:
         raise DemError("point cloud has zero spatial extent; cannot determine an automatic resolution")
-    avg_spacing_m = np.sqrt(area_m2 / len(x))
-    return avg_spacing_m * AUTO_RESOLUTION_SPACING_FACTOR
+    cell = 4.0 * np.sqrt(bbox_area_m2 / len(x))
+    cols = ((x - x.min()) / cell).astype(np.int64)
+    rows = ((y - y.min()) / cell).astype(np.int64)
+    occupied_area_m2 = np.unique(rows * (cols.max() + 1) + cols).size * cell**2
+    resolution = np.sqrt(min(occupied_area_m2, bbox_area_m2) / len(x)) * AUTO_RESOLUTION_SPACING_FACTOR
+    # A round figure (0.40 m, not 0.397 m): products of different runs share
+    # the same grid, and the number reads plainly in the report.
+    step = 0.05 if resolution >= 0.25 else 0.01
+    return float(max(step, round(resolution / step) * step))
 
 
 def _cell_medians(cols: np.ndarray, rows: np.ndarray, z: np.ndarray, width: int, height: int) -> np.ndarray:
@@ -249,16 +262,17 @@ def _coverage(data: np.ndarray, resolution_m: float) -> np.ndarray:
     return ndimage.binary_fill_holes(distance_m <= margin_m)
 
 
-def _despike(grid: np.ndarray, coverage: np.ndarray, resolution_m: float) -> np.ndarray:
+def _despike(grid: np.ndarray, resolution_m: float) -> np.ndarray:
     """Boolean mask of populated cells that are spikes (module docstring)."""
     data = np.isfinite(grid)
-    complete = _fill_from_neighbors(grid, coverage)
-    # The median filter needs a value everywhere; outside the coverage use
-    # the nearest covered value, so the edges are judged against real data.
-    outside = ~np.isfinite(complete)
-    if outside.any():
-        nearest = ndimage.distance_transform_edt(outside, return_distances=False, return_indices=True)
-        complete = complete[tuple(nearest)]
+    # The median filter needs a value everywhere: every empty cell takes the
+    # nearest populated one (one distance transform; growing holes ring by
+    # ring cost one full-grid convolution per ring), so each cell is judged
+    # against real data around it.
+    complete = grid
+    if not data.all():
+        nearest = ndimage.distance_transform_edt(~data, return_distances=False, return_indices=True)
+        complete = grid[tuple(nearest)]
     neighborhood = ndimage.median_filter(complete, size=DESPIKE_WINDOW_CELLS, mode="nearest")
     deviation = np.abs(grid - neighborhood)
     robust_sigma = OUTLIER_MAD_SCALE * float(np.median(deviation[data])) if data.any() else 0.0
@@ -340,7 +354,7 @@ def run_dem_generation(
     coverage = _coverage(np.isfinite(grid), resolution_m)
 
     _report("Removendo picos (filtro de ruído)")
-    spikes = _despike(grid, coverage, resolution_m)
+    spikes = _despike(grid, resolution_m)
     grid[spikes] = np.nan
 
     _report("Preenchendo buracos (interpolação)")
