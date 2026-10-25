@@ -3,8 +3,10 @@
 param(
     [Parameter(Mandatory = $true)][string]$Distro,
     [Parameter(Mandatory = $true)][string]$WslUser,
-    [Parameter(Mandatory = $true)][string]$AppDir
+    [Parameter(Mandatory = $true)][string]$AppDir,
+    [string]$Launcher = ""
 )
+if ($Launcher -eq "") { $Launcher = "/home/$WslUser/.local/bin/htrmapper-abrir" }
 $ErrorActionPreference = "Stop"
 
 $dest = Join-Path $env:LOCALAPPDATA "HTRMapper"
@@ -20,7 +22,10 @@ Option Explicit
 Dim sh, code, shortcutLog
 Set sh = CreateObject("WScript.Shell")
 shortcutLog = sh.ExpandEnvironmentStrings("%LOCALAPPDATA%") & "\HTRMapper\atalho.log"
-code = sh.Run("cmd.exe /s /c "" wsl.exe -d ""$Distro"" -- bash -lc ""~/.local/bin/htrmapper-abrir"" > """ & shortcutLog & """ 2>&1 """, 0, True)
+' Nada entre aspas para o wsl.exe: algumas versões não tiram as aspas do
+' nome da distribuição (-d "Ubuntu" dá WSL_E_DISTRO_NOT_FOUND). Os nomes
+' de distribuição e o caminho do lançador não têm espaços.
+code = sh.Run("cmd.exe /s /c "" wsl.exe -d $Distro --exec $Launcher > """ & shortcutLog & """ 2>&1 """, 0, True)
 If code <> 0 Then
     MsgBox "O HTRMapper fechou com um erro (código " & code & ")." & vbCrLf & vbCrLf & _
         "Veja os logs em:" & vbCrLf & shortcutLog & vbCrLf & "$logWin", vbExclamation, "HTRMapper"
@@ -32,7 +37,7 @@ End If
 $update = @"
 @echo off
 echo Atualizando o HTRMapper (git pull + reinstalacao do ambiente)...
-wsl.exe -d "$Distro" -- bash -lc "cd '$AppDir' && git pull && bash windows/instalar_wsl.sh"
+wsl.exe -d $Distro -- bash -lc "cd '$AppDir' && git pull && bash windows/instalar_wsl.sh"
 echo.
 pause
 "@

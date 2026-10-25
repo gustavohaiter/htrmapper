@@ -101,7 +101,8 @@ if [ "$CREATE_SHORTCUTS" = "1" ]; then
     say "Atalhos no Windows"
     PS1_WIN="$(wslpath -w "$APP_DIR/windows/criar_atalhos.ps1")"
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1_WIN" \
-        -Distro "${WSL_DISTRO_NAME:-Ubuntu}" -WslUser "$(whoami)" -AppDir "$APP_DIR"
+        -Distro "${WSL_DISTRO_NAME:-Ubuntu}" -WslUser "$(whoami)" -AppDir "$APP_DIR" \
+        -Launcher "$HOME/.local/bin/htrmapper-abrir"
 fi
 
 say "Pronto. Para abrir: atalho 'HTRMapper' na Área de Trabalho do Windows, ou 'htrmapper-gui' aqui no terminal."
