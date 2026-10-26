@@ -24,7 +24,7 @@ class ImageStats:
     d_east_cm: float | None = None
     d_north_cm: float | None = None
     d_up_cm: float | None = None
-    in_rmse: bool = True  # False: no RTK FIX, weighted by its own std-dev and left out of the RMSE
+    in_rmse: bool = True  # False: no RTK FIX, not a GNSS observation in the adjustment, left out of the RMSE
 
 
 @dataclass
@@ -47,6 +47,10 @@ class ReportStats:
     # Number of cameras seeing each cell over the DEM extent (Pix4D overlap map).
     overlap: np.ndarray | None = None
     overlap_extent: tuple[float, float, float, float] | None = None
+    # Reprojection error over every observation of the adjusted reconstruction.
+    reprojection_rms_px: float | None = None
+    reprojection_max_px: float | None = None
+    camera_xy: dict[str, tuple[float, float]] = field(default_factory=dict)  # adjusted centers (project CRS)
 
 
 def _keypoints_per_image(database_path: str) -> dict[str, int]:
@@ -83,43 +87,52 @@ def _camera_position_errors(project: Project, reconstruction) -> dict[str, tuple
     return errors
 
 
-def _residual_grid(reconstruction, cells: int = 12) -> tuple[tuple, tuple[int, int]] | None:
-    """Mean reprojection residual (projected minus observed) per image cell,
-    over every observation of every image of the (single) camera."""
+def _residual_grid(reconstruction, cells_x: int = 24) -> tuple | None:
+    """Mean reprojection residual (projected minus observed) per image cell
+    (Metashape's "image residuals" figure), over every observation of every
+    image of the (single) camera, plus the RMS and maximum residual.
+    Returns ((centers_x, centers_y, mean_dx, mean_dy, count), (width, height), rms, max) or None."""
     cameras = list(reconstruction.cameras.values())
     if not cameras:
         return None
     width, height = cameras[0].width, cameras[0].height
-    sum_dx = np.zeros((cells, cells))
-    sum_dy = np.zeros((cells, cells))
-    count = np.zeros((cells, cells))
+    cells_y = max(1, round(cells_x * height / width))
+    sum_dx = np.zeros((cells_y, cells_x))
+    sum_dy = np.zeros((cells_y, cells_x))
+    count = np.zeros((cells_y, cells_x))
+    sum_sq, num, worst = 0.0, 0, 0.0
+    points3d = reconstruction.points3D
     for image_id in reconstruction.reg_image_ids():
         image = reconstruction.image(image_id)
         if image.camera_id != cameras[0].camera_id:
             continue
         # Only the keypoints that became a tie point (a fraction of all).
         observations = image.get_observation_points2D()
-        observed = [p.xy for p in observations]
-        xyz = [reconstruction.points3D[p.point3D_id].xyz for p in observations]
-        if not observed:
+        if not len(observations):
             continue
-        observed = np.asarray(observed)
-        projected = image.camera.img_from_cam(image.cam_from_world() * np.asarray(xyz))
+        observed = np.asarray([p.xy for p in observations])
+        xyz = np.asarray([points3d[p.point3D_id].xyz for p in observations])
+        projected = image.camera.img_from_cam(image.cam_from_world() * xyz)
         ok = np.all(np.isfinite(projected), axis=1)
         delta = projected[ok] - observed[ok]
-        gx = np.clip((observed[ok, 0] / width * cells).astype(int), 0, cells - 1)
-        gy = np.clip((observed[ok, 1] / height * cells).astype(int), 0, cells - 1)
+        norms_sq = (delta**2).sum(axis=1)
+        sum_sq += float(norms_sq.sum())
+        num += int(norms_sq.size)
+        if norms_sq.size:
+            worst = max(worst, float(np.sqrt(norms_sq.max())))
+        gx = np.clip((observed[ok, 0] / width * cells_x).astype(int), 0, cells_x - 1)
+        gy = np.clip((observed[ok, 1] / height * cells_y).astype(int), 0, cells_y - 1)
         np.add.at(sum_dx, (gy, gx), delta[:, 0])
         np.add.at(sum_dy, (gy, gx), delta[:, 1])
         np.add.at(count, (gy, gx), 1)
-    if count.sum() == 0:
+    if num == 0:
         return None
     with np.errstate(invalid="ignore"):
         mean_dx = sum_dx / count
         mean_dy = sum_dy / count
-    centers_x = (np.arange(cells) + 0.5) * width / cells
-    centers_y = (np.arange(cells) + 0.5) * height / cells
-    return (centers_x, centers_y, mean_dx, mean_dy, count), (width, height)
+    centers_x = (np.arange(cells_x) + 0.5) * width / cells_x
+    centers_y = (np.arange(cells_y) + 0.5) * height / cells_y
+    return (centers_x, centers_y, mean_dx, mean_dy, count), (width, height), float(np.sqrt(sum_sq / num)), worst
 
 
 def _overlap_and_height(project: Project, max_cells: int = 300):
@@ -205,7 +218,11 @@ def compute_report_stats(project: Project, ortho_resolution_scale: float = 1.0) 
             item.d_east_cm, item.d_north_cm, item.d_up_cm, item.in_rmse = de, dn, du, in_rmse
         residuals = _residual_grid(reconstruction)
         if residuals is not None:
-            stats.residual_grid, stats.residual_image_size = residuals
+            stats.residual_grid, stats.residual_image_size, stats.reprojection_rms_px, stats.reprojection_max_px = residuals
+        for image_id in reconstruction.reg_image_ids():
+            image = reconstruction.image(image_id)
+            center = image.projection_center()
+            stats.camera_xy[image.name] = (float(center[0]), float(center[1]))
 
     stats.images = sorted(per_image.values(), key=lambda s: s.name)
     kp = [s.keypoints for s in stats.images if s.keypoints is not None]

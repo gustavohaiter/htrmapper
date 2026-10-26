@@ -1,13 +1,16 @@
-"""PDF processing report, modelled on Pix4D's quality report and
-Metashape's processing report (ARCHITECTURE.md section 31).
+"""PDF processing report, compact, laid out like Metashape's processing
+report (ARCHITECTURE.md sections 31 and 34):
 
-Sections: summary; quality check (Pix4D's traffic-light criteria plus
-reprojection error and georeferencing); previews of the orthomosaic and
-DEM; camera positions and their differences to the GNSS; image overlap
-map; camera calibration (initial vs. optimized, distortion profile, image
-residuals); bundle adjustment (tie points, track lengths, cleanup passes);
-dense cloud, DEM and orthomosaic details; processing parameters and times;
-hardware and software; warnings; and a per-photo table in the appendix.
+1. Cover: project, date, level and the orthomosaic.
+2. Survey data: camera positions over the image-overlap map, the survey
+   figures (photos, flying height, GSD, area, tie points, projections,
+   reprojection error), the camera, and a quality check with Pix4D's
+   traffic-light criteria.
+3. Camera calibration: image residuals and the calibrated coefficients.
+4. Camera locations: each photo's difference to its GNSS position drawn as
+   an ellipse over the orthomosaic, and the RMS errors.
+5. Digital elevation model.
+6. Processing parameters, times and system.
 
 Every value comes from the processing outputs (`report.stats`); a value
 that could not be measured is printed as "não disponível", never guessed.
@@ -26,6 +29,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import BoundaryNorm, LightSource, ListedColormap
+from matplotlib.patches import Ellipse, Rectangle
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
@@ -33,16 +37,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import (
-    Image,
-    KeepTogether,
-    PageBreak,
-    Paragraph,
-    SimpleDocTemplate,
-    Spacer,
-    Table,
-    TableStyle,
-)
+from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from htrmapper.core import theme
 from htrmapper.core.project import Project
@@ -55,15 +50,21 @@ STATUS_COLORS = {"ok": GREEN, "atencao": YELLOW, "ruim": RED, "na": colors.HexCo
 STATUS_TEXT = {"ok": "OK", "atencao": "ATENÇÃO", "ruim": "RUIM", "na": "N/D"}
 PAGE_WIDTH = A4[0] - 3.6 * cm
 NA = "não disponível"
-STEP_LABELS = {
-    "importar": "Importar fotos",
-    "alinhar": "Alinhamento",
-    "ajustar": "Ajuste com GNSS",
-    "densa": "Nuvem densa",
-    "dem": "DEM",
-    "ortho": "Ortomosaico",
-    "relatorio": "Relatório",
-}
+_QUALITY = {"baixa": "Baixa", "media": "Média", "alta": "Alta"}
+_REFINED = {"focal_length": "focal", "principal_point": "centro óptico", "distortion": "distorção"}
+# Metashape's overlap palette: 1 (red) ... 9, > 9 (blue).
+OVERLAP_COLORS = [
+    "#D73027",
+    "#F46D43",
+    "#FDAE61",
+    "#D9EF8B",
+    "#91CF60",
+    "#1A9850",
+    "#35B5A5",
+    "#3B9AD9",
+    "#3366CC",
+    "#2B3FC4",
+]
 
 
 def _register_fonts() -> tuple[str, str]:
@@ -74,480 +75,50 @@ def _register_fonts() -> tuple[str, str]:
         if "DejaVu" not in pdfmetrics.getRegisteredFontNames():
             pdfmetrics.registerFont(TTFont("DejaVu", str(font_dir / "DejaVuSans.ttf")))
             pdfmetrics.registerFont(TTFont("DejaVu-Bold", str(font_dir / "DejaVuSans-Bold.ttf")))
+            # So that <b> inside a paragraph switches to the bold face.
+            pdfmetrics.registerFontFamily(
+                "DejaVu", normal="DejaVu", bold="DejaVu-Bold", italic="DejaVu", boldItalic="DejaVu-Bold"
+            )
         return "DejaVu", "DejaVu-Bold"
     except Exception:  # noqa: BLE001 -- fall back to the PDF core fonts
         return "Helvetica", "Helvetica-Bold"
 
 
 def _fmt(value, digits: int = 2, unit: str = "") -> str:
+    """Brazilian number format (1.234,56), or 'não disponível'."""
     if value is None or (isinstance(value, float) and not np.isfinite(value)):
         return NA
-    if isinstance(value, int):
-        text = f"{value:,}".replace(",", ".")
+    if isinstance(value, (int, np.integer)):
+        text = f"{int(value):,}".replace(",", ".")
     else:
         text = f"{value:,.{digits}f}".replace(",", "X").replace(".", ",").replace("X", ".")
     return f"{text} {unit}".strip()
 
 
-def _png(fig, dpi: int = 150) -> io.BytesIO:
+def _duration(seconds: float) -> str:
+    from htrmapper.pipeline.timing import format_duration
+
+    return format_duration(seconds)
+
+
+def _png(fig, dpi: int = 170) -> io.BytesIO:
     buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", dpi=dpi, bbox_inches="tight")
+    fig.savefig(buffer, format="png", dpi=dpi, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     buffer.seek(0)
     return buffer
 
 
-def _image(buffer: io.BytesIO, width: float) -> Image:
+def _image(buffer: io.BytesIO, width: float, max_height: float | None = None) -> Image:
     from reportlab.lib.utils import ImageReader
 
     reader = ImageReader(buffer)
     w, h = reader.getSize()
     buffer.seek(0)
-    return Image(buffer, width=width, height=width * h / w)
-
-
-class _Builder:
-    def __init__(self, project: Project, level, stats: ReportStats, warnings: list[str]):
-        self.project = project
-        self.level = level
-        self.stats = stats
-        self.warnings = warnings
-        self.font, self.bold = _register_fonts()
-        base = getSampleStyleSheet()
-        self.h1 = ParagraphStyle(
-            "h1",
-            parent=base["Heading1"],
-            fontName=self.bold,
-            fontSize=15,
-            textColor=colors.HexColor(theme.PRIMARY_DARK),
-        )
-        self.h2 = ParagraphStyle(
-            "h2",
-            parent=base["Heading2"],
-            fontName=self.bold,
-            fontSize=12,
-            textColor=colors.HexColor(theme.PRIMARY_DARK),
-            spaceBefore=10,
-        )
-        self.body = ParagraphStyle("body", parent=base["BodyText"], fontName=self.font, fontSize=9, leading=12)
-        self.small = ParagraphStyle("small", parent=self.body, fontSize=7.5, leading=9.5)
-        self.cell = ParagraphStyle("cell", parent=self.body, fontSize=8, leading=10)
-        self.title = ParagraphStyle(
-            "title",
-            parent=base["Title"],
-            fontName=self.bold,
-            fontSize=20,
-            textColor=colors.HexColor(theme.PRIMARY_DARK),
-            alignment=TA_CENTER,
-        )
-        self.story: list = []
-
-    # -- helpers -------------------------------------------------------------
-
-    def p(self, text: str, style=None) -> None:
-        self.story.append(Paragraph(text, style or self.body))
-
-    def table(self, rows: list[list], widths: list[float] | None = None, header: bool = True, extra=None) -> Table:
-        data = [[Paragraph(str(c), self.cell) if not isinstance(c, Paragraph) else c for c in row] for row in rows]
-        if header:
-            data[0] = [Paragraph(f"<font color='white'><b>{c}</b></font>", self.cell) for c in rows[0]]
-        table = Table(data, colWidths=widths, repeatRows=1 if header else 0)
-        style = [
-            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor(theme.BORDER)),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("TOPPADDING", (0, 0), (-1, -1), 2.5),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5),
-            ("ROWBACKGROUNDS", (0, 1 if header else 0), (-1, -1), [colors.white, colors.HexColor(theme.SURFACE)]),
-        ]
-        if header:
-            style += [("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(theme.PRIMARY_DARK))]
-        table.setStyle(TableStyle(style + (extra or [])))
-        return table
-
-    def kv(self, rows: list[tuple[str, str]]) -> Table:
-        return self.table(
-            [[f"<b>{k}</b>", v] for k, v in rows], widths=[0.38 * PAGE_WIDTH, 0.62 * PAGE_WIDTH], header=False
-        )
-
-    # -- sections ------------------------------------------------------------
-
-    def cover(self) -> None:
-        p = self.project
-        self.story += [Spacer(1, 1.2 * cm), Paragraph("Relatório de Processamento", self.title), Spacer(1, 0.2 * cm)]
-        self.p(f"<para alignment='center'><b>{p.name}</b> — HTRMapper</para>")
-        self.story.append(Spacer(1, 0.6 * cm))
-        processing = p.processing
-        camera = ", ".join(sorted({i.camera_model or "?" for i in p.images}))
-        aligned = f"{p.sfm.num_registered} de {p.sfm.num_images_input}" if p.sfm else NA
-        times = processing.steps_done if processing else {}
-        total_s = sum(v.get("seconds", 0) for v in times.values())
-        from htrmapper.geo.crs import CoordinateReferenceSystem
-
-        crs = CoordinateReferenceSystem(p.crs.project_epsg)
-        self.story.append(
-            self.kv(
-                [
-                    ("Projeto", p.name),
-                    ("Processado em", datetime.now().strftime("%d/%m/%Y %H:%M")),
-                    ("Nível de processamento", f"{self.level.label} — {self.level.summary}"),
-                    ("Câmera", camera),
-                    ("Fotos alinhadas", aligned),
-                    ("GSD médio", _fmt(self.stats.gsd_cm, 2, "cm/pixel")),
-                    ("Altura média de voo (sobre o terreno)", _fmt(self.stats.mean_flying_height_m, 1, "m")),
-                    ("Área coberta pelo ortomosaico", _fmt(self.stats.covered_area_ha, 2, "ha")),
-                    ("Sistema de coordenadas", f"EPSG:{p.crs.project_epsg} — {crs.name}"),
-                    ("Referência vertical", "Altura elipsoidal (GRS80), a mesma do GNSS do drone"),
-                    ("Georreferenciamento", "RTK das câmeras (sem pontos de controle no solo)"),
-                    ("Tempo total de processamento", _duration(total_s) if total_s else NA),
-                    ("Software", f"HTRMapper {processing.software_version if processing else ''}"),
-                ]
-            )
-        )
-
-    def quality_check(self) -> None:
-        s, p = self.stats, self.project
-        self.story.append(Paragraph("1. Verificação de qualidade", self.h1))
-        self.p(
-            "Critérios do relatório de qualidade do Pix4D (fotos, conjunto, otimização da câmera e correspondências), "
-            "mais o erro de reprojeção e o georreferenciamento. Verde = ok, amarelo = atenção, vermelho = ruim."
-        )
-        rows = [["Item", "Valor", "Situação", "Critério"]]
-        statuses = []
-
-        def add(item, value, status, rule):
-            rows.append(
-                [item, value, Paragraph(f"<font color='white'><b>{STATUS_TEXT[status]}</b></font>", self.cell), rule]
-            )
-            statuses.append(status)
-
-        if s.median_keypoints is not None:
-            k = s.median_keypoints
-            add(
-                "Pontos-chave por foto (mediana)",
-                _fmt(int(k)),
-                "ok" if k > 10000 else "atencao" if k >= 500 else "ruim",
-                "verde > 10.000; vermelho < 500",
-            )
-        else:
-            add("Pontos-chave por foto (mediana)", NA, "na", "")
-        if p.sfm:
-            frac = p.sfm.num_registered / max(1, p.sfm.num_images_input)
-            add(
-                "Fotos alinhadas",
-                f"{p.sfm.num_registered}/{p.sfm.num_images_input} ({frac:.0%})",
-                "ok" if frac > 0.95 else "atencao" if frac >= 0.60 else "ruim",
-                "verde > 95%; vermelho < 60%",
-            )
-        change = _focal_change(p)
-        if change is not None:
-            add(
-                "Otimização da câmera (variação da focal)",
-                f"{change:.2%}".replace(".", ","),
-                "ok" if change < 0.05 else "atencao" if change <= 0.20 else "ruim",
-                "verde < 5%; vermelho > 20%",
-            )
-        if s.median_tie_points is not None:
-            t = s.median_tie_points
-            add(
-                "Correspondências por foto (mediana)",
-                _fmt(int(t)),
-                "ok" if t > 1000 else "atencao" if t >= 100 else "ruim",
-                "verde > 1.000; vermelho < 100",
-            )
-        if p.ba and p.ba.mean_reprojection_error_px is not None:
-            e = p.ba.mean_reprojection_error_px
-            add(
-                "Erro médio de reprojeção",
-                _fmt(e, 3, "pixel"),
-                "ok" if e < 1.0 else "atencao" if e <= 2.0 else "ruim",
-                "verde < 1 px; vermelho > 2 px",
-            )
-        if p.ba and p.ba.rmse_xy_cm is not None:
-            sigma_cm = p.gnss_accuracy.accuracy.xy_sigma_m * 100
-            add(
-                "Georreferenciamento (câmera × GNSS, XY)",
-                f"RMSE {_fmt(p.ba.rmse_xy_cm, 1, 'cm')}",
-                "atencao" if p.ba.rmse_xy_cm <= 3 * sigma_cm else "ruim",
-                "sem pontos de controle no solo: amarelo, como no Pix4D; validar com alvos de campo",
-            )
-        extra = [("BACKGROUND", (2, i + 1), (2, i + 1), STATUS_COLORS[status]) for i, status in enumerate(statuses)]
-        self.story.append(
-            self.table(rows, [0.32 * PAGE_WIDTH, 0.2 * PAGE_WIDTH, 0.13 * PAGE_WIDTH, 0.35 * PAGE_WIDTH], extra=extra)
-        )
-
-    def previews(self) -> None:
-        p = self.project
-        self.story.append(Paragraph("2. Prévias", self.h1))
-        if p.ortho and Path(p.ortho.raster_path).is_file():
-            self.story.append(Paragraph("Ortomosaico", self.h2))
-            self.story.append(_image(_ortho_preview(p.ortho.raster_path), PAGE_WIDTH * 0.9))
-        if p.dem and Path(p.dem.raster_path).is_file():
-            self.story.append(Paragraph("DEM (modelo digital de superfície)", self.h2))
-            self.story.append(_image(_dem_preview(p.dem.raster_path), PAGE_WIDTH * 0.9))
-
-    def cameras(self) -> None:
-        p, s = self.project, self.stats
-        self.story.append(PageBreak())
-        self.story.append(Paragraph("3. Posições das câmeras", self.h1))
-        errors = [i for i in s.images if i.d_east_cm is not None]
-        if errors:
-            self.p(
-                "Posição de cada foto após o ajuste, com a diferença para a posição do GNSS (RTK) desenhada como "
-                "seta (ampliada) e colorida pela diferença vertical. Fotos sem RTK FIX (losango vermelho) não "
-                "entram como observação GNSS no ajuste: ficam no lugar pelos tie points, e a diferença delas mostra "
-                "o erro do GNSS antes do FIX. Também ficam fora do RMSE."
-            )
-            self.story.append(_image(_camera_error_plot(p, errors), PAGE_WIDTH * 0.85))
-        if p.ba:
-            ba = p.ba
-            self.story.append(Paragraph("Diferença câmera × GNSS (fotos com RTK FIX)", self.h2))
-            self.story.append(
-                self.table(
-                    [
-                        ["Leste (X)", "Norte (Y)", "Vertical (Z)", "Horizontal (XY)", "Total", "Máximo"],
-                        [
-                            _fmt(ba.rmse_x_cm, 2, "cm"),
-                            _fmt(ba.rmse_y_cm, 2, "cm"),
-                            _fmt(ba.rmse_z_cm, 2, "cm"),
-                            _fmt(ba.rmse_xy_cm, 2, "cm"),
-                            _fmt(ba.rmse_total_cm, 2, "cm"),
-                            _fmt(ba.max_error_cm, 2, "cm"),
-                        ],
-                    ]
-                )
-            )
-            self.p(
-                "RMSE das diferenças entre o centro de cada câmera ajustada e a posição do GNSS. Mostra a coerência "
-                "entre as fotos e o RTK; a exatidão no terreno só é comprovada com pontos de verificação medidos em campo.",
-                self.small,
-            )
-            bins = _variance_bins([i for i in errors if i.in_rmse], p.gnss_accuracy.accuracy.xy_sigma_m * 100)
-            if bins:
-                self.story.append(
-                    Paragraph("Distribuição das diferenças (como a 'Absolute Geolocation Variance' do Pix4D)", self.h2)
-                )
-                self.story.append(self.table(bins))
-        if s.overlap is not None:
-            self.story.append(PageBreak())
-            self.story.append(Paragraph("4. Sobreposição das fotos", self.h1))
-            self.p(
-                "Quantas fotos enxergam cada ponto do terreno. Verde (5 ou mais) é o recomendado pelo Pix4D; vermelho "
-                "e laranja indicam pouca sobreposição, normalmente só nas bordas do voo, onde o resultado é menos confiável."
-            )
-            self.story.append(_image(_overlap_plot(s), PAGE_WIDTH * 0.85))
-
-    def calibration(self) -> None:
-        p, s = self.project, self.stats
-        if not p.ba or not p.ba.camera_calibration:
-            return
-        self.story.append(PageBreak())
-        self.story.append(Paragraph("5. Calibração da câmera", self.h1))
-        self.p(
-            "Parâmetros internos estimados no ajuste, junto com as posições do RTK (modelo OPENCV do COLMAP: focal, "
-            "centro óptico, distorção radial k1, k2 e tangencial p1, p2), comparados com os valores iniciais."
-        )
-        for camera_id, data in p.ba.camera_calibration.items():
-            names = [n.strip() for n in data["params_info"].split(",")]
-            initial, final = data["initial_params"], data["params"]
-            rows = [["Parâmetro", "Inicial", "Otimizado", "Variação"]]
-            for name, a, b in zip(names, initial, final):
-                digits = 3 if name in ("fx", "fy", "cx", "cy") else 6
-                diff = f"{(b - a) / a:+.3%}".replace(".", ",") if name in ("fx", "fy") and a else _fmt(b - a, digits)
-                rows.append([name, _fmt(float(a), digits), _fmt(float(b), digits), diff])
-            self.story.append(Paragraph(f"Câmera {camera_id} ({data['model']})", self.h2))
-            self.story.append(
-                self.table(rows, [0.2 * PAGE_WIDTH, 0.27 * PAGE_WIDTH, 0.27 * PAGE_WIDTH, 0.26 * PAGE_WIDTH])
-            )
-            if p.ba.intrinsics_refined:
-                self.p("Refinados no ajuste: " + ", ".join(p.ba.intrinsics_refined), self.small)
-            for note in p.ba.intrinsics_notes:
-                self.p("Aviso: " + note, self.small)
-            figure = _distortion_and_residuals(names, final, s)
-            if figure is not None:
-                self.story.append(_image(figure, PAGE_WIDTH))
-
-    def bundle_adjustment(self) -> None:
-        p, s = self.project, self.stats
-        self.story.append(PageBreak())
-        self.story.append(Paragraph("6. Ajuste de feixes (bundle adjustment)", self.h1))
-        rows = [
-            ("Pontos 3D (tie points)", _fmt(s.num_points3d) if s.num_points3d else NA),
-            ("Observações 2D usadas no ajuste", _fmt(s.num_observations) if s.num_observations else NA),
-            ("Fotos por ponto 3D (média)", _fmt(s.mean_track_length, 2)),
-            ("Pontos-chave por foto (mediana)", _fmt(int(s.median_keypoints)) if s.median_keypoints else NA),
-            ("Correspondências por foto (mediana)", _fmt(int(s.median_tie_points)) if s.median_tie_points else NA),
-        ]
-        if p.sfm:
-            rows += [
-                ("Erro de reprojeção do alinhamento inicial", _fmt(p.sfm.mean_reprojection_error_px, 3, "pixel")),
-                ("Estratégia de correspondência", p.sfm.matching_strategy or NA),
-            ]
-        if p.ba:
-            ba = p.ba
-            rows += [
-                ("Erro de reprojeção final (após ajuste e limpeza)", _fmt(ba.mean_reprojection_error_px, 3, "pixel")),
-                (
-                    "Precisão do GNSS informada",
-                    f"{_fmt(p.gnss_accuracy.accuracy.xy_sigma_m * 100, 1, 'cm')} (XY), "
-                    f"{_fmt(p.gnss_accuracy.accuracy.z_sigma_m * 100, 1, 'cm')} (Z); por foto, o desvio do RTK quando maior",
-                ),
-                ("Convergência", f"{'sim' if ba.converged else 'NÃO'} ({ba.termination_type.split('.')[-1]})"),
-            ]
-            if ba.images_excluded_from_rmse:
-                rows.append(("Fotos sem RTK FIX (sem observação GNSS, fora do RMSE)", ", ".join(ba.images_excluded_from_rmse)))
-        self.story.append(self.kv(rows))
-        if p.ba and p.ba.tie_point_cleanup_passes:
-            self.story.append(Paragraph("Limpeza de tie points", self.h2))
-            table = [["Passe", "Limite de erro", "Observações removidas", "Tie points restantes", "Reprojeção"]]
-            table.append(
-                [
-                    "antes",
-                    "-",
-                    "-",
-                    _fmt(p.ba.tie_points_before_cleanup),
-                    _fmt(p.ba.reprojection_error_before_cleanup_px, 3, "px"),
-                ]
-            )
-            for n, step in enumerate(p.ba.tie_point_cleanup_passes, start=1):
-                table.append(
-                    [
-                        str(n),
-                        _fmt(step["max_error_px"], 2, "px"),
-                        _fmt(int(step["observations_removed"])),
-                        _fmt(int(step["tie_points_left"])),
-                        _fmt(step["mean_reprojection_error_px"], 3, "px"),
-                    ]
-                )
-            self.story.append(self.table(table))
-        if s.track_length_counts:
-            self.story.append(Paragraph("Pontos 3D por número de fotos que os enxergam", self.h2))
-            self.p("Pontos vistos em só 2 ou 3 fotos são menos precisos; quanto mais à direita, melhor.", self.small)
-            self.story.append(_image(_track_plot(s.track_length_counts), PAGE_WIDTH * 0.8))
-
-    def products(self) -> None:
-        p, s = self.project, self.stats
-        self.story.append(PageBreak())
-        self.story.append(Paragraph("7. Nuvem densa, DEM e ortomosaico", self.h1))
-        if p.mvs:
-            self.story.append(Paragraph("Nuvem densa", self.h2))
-            self.story.append(
-                self.kv(
-                    [
-                        ("Pontos", _fmt(p.mvs.num_points)),
-                        ("Qualidade", p.mvs.quality),
-                        ("Densidade média na área reconstruída", _fmt(s.dense_density_per_m2, 1, "pontos/m²")),
-                        ("Método", "COLMAP patch-match stereo (GPU) com consistência geométrica e fusão"),
-                    ]
-                )
-            )
-        if p.dem:
-            d = p.dem
-            covered = d.width_px * d.height_px * (1 - d.nodata_fraction)
-            self.story.append(Paragraph("DEM", self.h2))
-            self.story.append(
-                self.kv(
-                    [
-                        (
-                            "Resolução",
-                            _fmt(d.resolution_m * 100, 1, "cm/pixel") + f" ({_resolution_source(d.resolution_source)})",
-                        ),
-                        ("Tamanho", f"{d.width_px} x {d.height_px} pixels"),
-                        (
-                            "Altitudes (elipsoidais)",
-                            f"{_fmt(d.min_elevation_m, 2)} a {_fmt(d.max_elevation_m, 2, 'm')}",
-                        ),
-                        ("Células com picos removidos", _fmt(d.num_cells_despiked)),
-                        (
-                            "Células interpoladas (sem pontos)",
-                            f"{_fmt(d.num_cells_interpolated)} ({d.num_cells_interpolated / covered:.1%} da área)".replace(
-                                ".", ","
-                            )
-                            if covered
-                            else NA,
-                        ),
-                        ("Fora da área reconstruída (NoData)", f"{d.nodata_fraction:.1%}".replace(".", ",")),
-                        ("Arquivo", Path(d.raster_path).name),
-                    ]
-                )
-            )
-        if p.ortho:
-            o = p.ortho
-            self.story.append(Paragraph("Ortomosaico", self.h2))
-            self.story.append(
-                self.kv(
-                    [
-                        (
-                            "Resolução (pixel)",
-                            _fmt(o.resolution_m * 100, 2, "cm") + f" ({_resolution_source(o.resolution_source)})",
-                        ),
-                        ("Tamanho", f"{o.width_px} x {o.height_px} pixels"),
-                        ("Área com imagem", _fmt(s.covered_area_ha, 2, "ha")),
-                        ("Fotos usadas", _fmt(o.num_cameras_used)),
-                        ("Formato", "GeoTIFF RGB, JPEG q90 (YCbCr), tiles 512, máscara interna, pirâmides internas"),
-                        ("Sistema de coordenadas", f"EPSG:{p.crs.project_epsg}"),
-                        ("Arquivo", Path(o.raster_path).name),
-                    ]
-                )
-            )
-
-    def parameters(self, log_path: Path | None) -> None:
-        p = self.project
-        self.story.append(PageBreak())
-        self.story.append(Paragraph("8. Parâmetros e tempos de processamento", self.h1))
-        self.story.append(Paragraph(f"Nível {self.level.label}", self.h2))
-        for line in self.level.parameters_text():
-            self.p("• " + line)
-        if p.processing and p.processing.steps_done:
-            self.story.append(Paragraph("Tempo por etapa", self.h2))
-            rows = [["Etapa", "Tempo", "Concluída em"]]
-            total = 0.0
-            for key, label in STEP_LABELS.items():
-                info = p.processing.steps_done.get(key)
-                if info:
-                    total += info.get("seconds", 0)
-                    rows.append(
-                        [label, _duration(info.get("seconds", 0)), info.get("finished_at", "").replace("T", " ")]
-                    )
-            rows.append(["<b>Total</b>", f"<b>{_duration(total)}</b>", ""])
-            self.story.append(self.table(rows, [0.4 * PAGE_WIDTH, 0.25 * PAGE_WIDTH, 0.35 * PAGE_WIDTH]))
-        self.story.append(Paragraph("Computador e software", self.h2))
-        from htrmapper.pipeline.auto import _system_lines
-
-        for line in _system_lines():
-            self.p("• " + line)
-        if log_path is not None:
-            self.p(f"Log completo do processamento: {Path(log_path).name}", self.small)
-        if self.warnings:
-            self.story.append(Paragraph("Avisos", self.h2))
-            for warning in self.warnings:
-                self.p("• " + warning)
-
-    def appendix(self) -> None:
-        s = self.stats
-        if not s.images:
-            return
-        self.story.append(PageBreak())
-        self.story.append(Paragraph("Anexo: dados por foto", self.h1))
-        self.p(
-            "dE, dN, dZ: diferença entre a câmera ajustada e a posição do GNSS (leste, norte, vertical).", self.small
-        )
-        rows = [["Foto", "RTK", "Pontos-chave", "Correspond.", "dE (cm)", "dN (cm)", "dZ (cm)"]]
-        for i in s.images:
-            rtk = {"50": "FIX", "34": "FLOAT", "16": "SINGLE"}.get(str(i.rtk_flag), str(i.rtk_flag or "-"))
-            rows.append(
-                [
-                    i.name,
-                    rtk + ("" if i.in_rmse else "*"),
-                    _fmt(i.keypoints) if i.keypoints is not None else "-",
-                    _fmt(i.tie_points) if i.tie_points else "não alinhou",
-                    _fmt(i.d_east_cm, 1) if i.d_east_cm is not None else "-",
-                    _fmt(i.d_north_cm, 1) if i.d_north_cm is not None else "-",
-                    _fmt(i.d_up_cm, 1) if i.d_up_cm is not None else "-",
-                ]
-            )
-        widths = [0.3, 0.1, 0.13, 0.13, 0.11, 0.11, 0.12]
-        self.story.append(self.table(rows, [w * PAGE_WIDTH for w in widths]))
-        self.p("* sem RTK FIX: não usada como observação GNSS no ajuste e fora do RMSE.", self.small)
+    height = width * h / w
+    if max_height is not None and height > max_height:
+        width, height = max_height * w / h, max_height
+    return Image(buffer, width=width, height=height)
 
 
 def _focal_change(project: Project) -> float | None:
@@ -565,229 +136,686 @@ def _focal_change(project: Project) -> float | None:
     return max(changes) if changes else None
 
 
-def _duration(seconds: float) -> str:
-    from htrmapper.pipeline.timing import format_duration
+def _camera_sensor(project: Project) -> dict:
+    """Model, resolution, focal length (mm) and pixel size (um) of the
+    camera, from the EXIF (sensor width via the 35 mm crop factor)."""
+    from htrmapper.geo.gsd import sensor_width_mm_from_crop_factor
 
-    return format_duration(seconds)
-
-
-def _resolution_source(text: str) -> str:
-    return (
-        text.replace("automatic (camera GSD)", "automática, pelo GSD das câmeras")
-        .replace("automatic (fallback: DEM resolution)", "automática, pela resolução do DEM")
-        .replace("automatic", "automática")
-        .replace("user-defined", "definida pelo usuário")
-    )
-
-
-def _variance_bins(images, sigma_cm: float) -> list[list[str]] | None:
+    images = [i for i in project.images if i.pixel_width and i.pixel_height]
     if not images:
-        return None
-    edges = [0, 1, 2, 3, np.inf]
-    rows = [["Faixa do erro", "X (leste)", "Y (norte)", "Z (vertical)"]]
-    data = {
-        "X": np.abs([i.d_east_cm for i in images]),
-        "Y": np.abs([i.d_north_cm for i in images]),
-        "Z": np.abs([i.d_up_cm for i in images]),
+        return {}
+    first = images[0]
+    info = {
+        "model": first.camera_model or "câmera",
+        "resolution": f"{first.pixel_width} x {first.pixel_height}",
+        "focal_mm": first.focal_length_mm,
+        "pixel_um": None,
+        "count": len(project.images),
     }
-    for low, high in zip(edges[:-1], edges[1:]):
-        label = f"{low:g}σ a {high:g}σ" if np.isfinite(high) else f"acima de {low:g}σ"
-        cells = [label]
-        for key in ("X", "Y", "Z"):
-            values = data[key] / sigma_cm
-            frac = np.mean((values >= low) & (values < high))
-            cells.append(f"{frac:.1%}".replace(".", ","))
-        rows.append(cells)
-    rows.append([f"σ = precisão informada do GNSS = {sigma_cm:g} cm".replace(".", ","), "", "", ""])
-    return rows
+    if first.focal_length_mm and first.focal_length_35mm_equiv:
+        sensor = sensor_width_mm_from_crop_factor(first.focal_length_mm, first.focal_length_35mm_equiv)
+        info["pixel_um"] = sensor / first.pixel_width * 1000.0
+    return info
+
+
+def _pixel_text(sensor: dict) -> str:
+    return f"{_fmt(sensor['pixel_um'], 2)} x {_fmt(sensor['pixel_um'], 2)} µm" if sensor.get("pixel_um") else NA
 
 
 # -- figures ---------------------------------------------------------------------
 
 
-def _read_preview(path: str, bands, max_px: int = 1400):
+def _read_preview(path: str, bands, max_px: int = 1600):
     import rasterio
 
     with rasterio.open(path) as src:
         scale = max(1.0, max(src.width, src.height) / max_px)
         shape = (max(1, int(src.height / scale)), max(1, int(src.width / scale)))
-        data = src.read(bands, out_shape=(len(bands), *shape) if isinstance(bands, list) else shape, masked=True)
+        out_shape = (len(bands), *shape) if isinstance(bands, list) else shape
+        data = src.read(bands, out_shape=out_shape, masked=True)
         mask = src.dataset_mask(out_shape=shape) > 0
         bounds = src.bounds
     return data, mask, (bounds.left, bounds.right, bounds.bottom, bounds.top)
 
 
-def _ortho_preview(path: str) -> io.BytesIO:
-    rgb, mask, extent = _read_preview(path, [1, 2, 3])
+def _ortho_rgba(path: str, max_px: int = 1600):
+    rgb, mask, extent = _read_preview(path, [1, 2, 3], max_px)
     rgba = np.dstack([np.moveaxis(np.asarray(rgb.filled(0)), 0, -1), (mask * 255).astype(np.uint8)])
-    fig, ax = plt.subplots(figsize=(7.5, 6.5))
-    ax.imshow(rgba, extent=extent)
-    _map_axes(ax)
-    return _png(fig)
+    return rgba, extent
 
 
-def _dem_preview(path: str) -> io.BytesIO:
-    z, _mask, extent = _read_preview(path, 1)
-    z = np.ma.masked_invalid(z.astype(float))
-    fig, ax = plt.subplots(figsize=(7.5, 6.5))
-    if z.count():
-        cell = (extent[1] - extent[0]) / z.shape[1]
-        shade = LightSource(azdeg=315, altdeg=45).hillshade(z.filled(np.nanmean(z)), dx=cell, dy=cell, vert_exag=3)
-        image = ax.imshow(z, cmap="terrain", extent=extent)
-        ax.imshow(np.ma.array(shade, mask=z.mask), cmap="gray", alpha=0.35, extent=extent)
-        fig.colorbar(image, ax=ax, shrink=0.75, label="Altitude elipsoidal (m)")
-    _map_axes(ax)
-    return _png(fig)
+def _nice_length(span: float) -> float:
+    """Largest 1, 2 or 5 x 10^n not above span (a round scale-bar length)."""
+    span = max(span, 1e-9)
+    magnitude = 10 ** np.floor(np.log10(span))
+    return float(max(m * magnitude for m in (1, 2, 5) if m * magnitude <= span))
 
 
-def _map_axes(ax) -> None:
-    ax.set_xlabel("Leste (m)")
-    ax.set_ylabel("Norte (m)")
-    ax.ticklabel_format(useOffset=False, style="plain")
-    ax.tick_params(labelsize=7)
-    ax.set_aspect("equal")
-
-
-def _camera_error_plot(project: Project, images) -> io.BytesIO:
-    import pycolmap
-
-    centers = {}
-    if project.ba and Path(project.ba.reconstruction_path).exists():
-        r = pycolmap.Reconstruction(project.ba.reconstruction_path)
-        centers = {r.image(i).name: r.image(i).projection_center() for i in r.reg_image_ids()}
-    pts = [(centers[i.name], i) for i in images if i.name in centers]
-    fig, ax = plt.subplots(figsize=(7.5, 6.5))
-    if pts:
-        xy = np.array([c[:2] for c, _ in pts])
-        de = np.array([i.d_east_cm for _, i in pts])
-        dn = np.array([i.d_north_cm for _, i in pts])
-        du = np.array([i.d_up_cm for _, i in pts])
-        fix = np.array([i.in_rmse for _, i in pts])
-        ax.plot(xy[:, 0], xy[:, 1], color="#BBBBBB", lw=0.6, zorder=1)
-        # Arrow length and color scale from the RTK FIX photos only: a photo
-        # taken before the fix can be meters off and would flatten every
-        # other arrow to nothing. Those are drawn apart, with their numbers.
-        ref = fix if fix.any() else np.ones_like(fix)
-        span = max(np.ptp(xy[:, 0]), np.ptp(xy[:, 1]), 1.0)
-        biggest = max(np.hypot(de[ref], dn[ref]).max(), 0.1)
-        scale = 0.06 * span / biggest
-        ax.quiver(
-            xy[ref, 0],
-            xy[ref, 1],
-            de[ref] * scale,
-            dn[ref] * scale,
-            angles="xy",
-            scale_units="xy",
-            scale=1,
-            width=0.003,
-            color="#333333",
-            zorder=3,
-        )
-        limit = max(np.abs(du[ref]).max(), 0.1)
-        sc = ax.scatter(
-            xy[ref, 0],
-            xy[ref, 1],
-            c=du[ref],
-            cmap="coolwarm",
-            vmin=-limit,
-            vmax=limit,
-            s=28,
-            zorder=2,
-            edgecolors="k",
-            linewidths=0.3,
-        )
-        for k in np.flatnonzero(~fix):
-            ax.scatter(xy[k, 0], xy[k, 1], s=55, marker="D", facecolors="none", edgecolors="#C62828", zorder=4)
-            ax.annotate(
-                f"sem FIX: {np.hypot(de[k], dn[k]):.0f} cm (XY), {du[k]:+.0f} cm (Z)".replace(".", ","),
-                (xy[k, 0], xy[k, 1]),
-                textcoords="offset points",
-                xytext=(6, 6 + 10 * (k % 3)),
-                fontsize=6.5,
-                color="#C62828",
-            )
-        fig.colorbar(sc, ax=ax, shrink=0.75, label="Diferença vertical dZ (cm), fotos com RTK FIX")
-        ax.set_title(
-            f"Setas: diferença horizontal nas fotos com RTK FIX (maior = {biggest:.1f} cm)".replace(".", ","),
-            fontsize=9,
-        )
-    _map_axes(ax)
-    return _png(fig)
-
-
-def _overlap_plot(stats: ReportStats) -> io.BytesIO:
-    overlap = np.ma.masked_invalid(stats.overlap)
-    cmap = ListedColormap(["#C62828", "#EF6C00", "#F9A825", "#9CCC65", "#2E7D32"])
-    norm = BoundaryNorm([0.5, 1.5, 2.5, 3.5, 4.5, 1000], cmap.N)
-    fig, ax = plt.subplots(figsize=(7.5, 6.5))
-    image = ax.imshow(np.clip(overlap, 0, 999), cmap=cmap, norm=norm, extent=stats.overlap_extent)
-    bar = fig.colorbar(image, ax=ax, shrink=0.75, ticks=[1, 2, 3, 4, 5])
-    bar.ax.set_yticklabels(["1", "2", "3", "4", "5 ou mais"])
-    bar.set_label("Fotos que enxergam o ponto")
-    _map_axes(ax)
-    return _png(fig)
-
-
-def _distortion_and_residuals(names, params, stats: ReportStats) -> io.BytesIO | None:
-    values = dict(zip(names, params))
-    has_distortion = "k1" in values and ("fx" in values or "f" in values)
-    if not has_distortion and stats.residual_grid is None:
-        return None
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4.2))
-    if has_distortion and stats.residual_image_size:
-        f = values.get("fx", values.get("f"))
-        w, h = stats.residual_image_size
-        r_max = np.hypot(w, h) / 2 / f
-        r = np.linspace(0, r_max, 200)
-        k1, k2 = values.get("k1", 0.0), values.get("k2", 0.0)
-        axes[0].plot(r * f, f * r * (k1 * r**2 + k2 * r**4), color=theme.PRIMARY)
-        axes[0].axhline(0, color="#999999", lw=0.6)
-        axes[0].set_xlabel("Distância ao centro da imagem (px)")
-        axes[0].set_ylabel("Deslocamento radial (px)")
-        axes[0].set_title("Distorção radial da lente", fontsize=9)
-    else:
-        axes[0].axis("off")
-    if stats.residual_grid is not None:
-        cx, cy, mdx, mdy, count = stats.residual_grid
-        gx, gy = np.meshgrid(cx, cy)
-        ok = count > 0
-        magnitude = np.hypot(mdx[ok], mdy[ok])
-        w, h = stats.residual_image_size
-        scale = 0.08 * w / max(magnitude.max(), 1e-6)
-        axes[1].quiver(
-            gx[ok],
-            gy[ok],
-            mdx[ok] * scale,
-            -mdy[ok] * scale,
-            angles="xy",
-            scale_units="xy",
-            scale=1,
-            width=0.004,
-            color=theme.PRIMARY_DARK,
-        )
-        axes[1].set_xlim(0, w)
-        axes[1].set_ylim(h, 0)
-        axes[1].set_aspect("equal")
-        axes[1].set_title(f"Resíduos médios na imagem (maior = {magnitude.max():.3f} px)".replace(".", ","), fontsize=9)
-        axes[1].tick_params(labelsize=7)
-    else:
-        axes[1].axis("off")
-    fig.tight_layout()
-    return _png(fig)
-
-
-def _track_plot(counts: dict[int, int]) -> io.BytesIO:
-    keys = sorted(counts)
-    labels = [str(k) if k < 10 else "10+" for k in keys if k < 10] + (["10+"] if any(k >= 10 for k in keys) else [])
-    values = [counts[k] for k in keys if k < 10] + (
-        [sum(v for k, v in counts.items() if k >= 10)] if any(k >= 10 for k in keys) else []
+def _scale_bar(ax, extent) -> None:
+    """Metashape-style scale bar (bottom right) and a north arrow (top left)."""
+    left, right, bottom, top = extent
+    width, height = right - left, top - bottom
+    length = _nice_length(width / 5)
+    x1 = right - 0.04 * width
+    x0 = x1 - length
+    y = bottom + 0.05 * height
+    tick = 0.012 * height
+    ax.plot([x0, x0, x1, x1], [y + tick, y, y, y + tick], color="black", lw=1.2, zorder=10)
+    label = f"{length:g} m" if length < 1000 else f"{length / 1000:g} km"
+    ax.text((x0 + x1) / 2, y - 0.012 * height, label, ha="center", va="top", fontsize=7, zorder=10)
+    nx, ny = left + 0.04 * width, top - 0.11 * height
+    ax.annotate(
+        "N",
+        xy=(nx, ny + 0.08 * height),
+        xytext=(nx, ny),
+        ha="center",
+        va="top",
+        fontsize=8,
+        fontweight="bold",
+        arrowprops={"arrowstyle": "-|>", "color": "black", "lw": 1.2},
+        zorder=10,
     )
-    fig, ax = plt.subplots(figsize=(7, 2.8))
-    ax.bar(labels, values, color=theme.PRIMARY)
-    ax.set_xlabel("Número de fotos")
-    ax.set_ylabel("Pontos 3D")
-    ax.tick_params(labelsize=8)
+
+
+def _map_figure(extent, width_in: float = 7.2):
+    left, right, bottom, top = extent
+    aspect = (top - bottom) / max(right - left, 1e-9)
+    fig, ax = plt.subplots(figsize=(width_in, min(width_in * aspect, 9.0)))
+    ax.set_xlim(left, right)
+    ax.set_ylim(bottom, top)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    return fig, ax
+
+
+def _cover_figure(rgba, extent) -> io.BytesIO:
+    fig, ax = _map_figure(extent)
+    ax.imshow(rgba, extent=extent, interpolation="lanczos")
+    _scale_bar(ax, extent)
     return _png(fig)
+
+
+def _overlap_figure(stats: ReportStats) -> io.BytesIO:
+    extent = stats.overlap_extent
+    fig, ax = _map_figure(extent)
+    cmap = ListedColormap(OVERLAP_COLORS)
+    norm = BoundaryNorm([0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 1e6], cmap.N)
+    overlap = np.ma.masked_invalid(stats.overlap)
+    ax.imshow(np.ma.masked_less(overlap, 1), cmap=cmap, norm=norm, extent=extent, interpolation="nearest")
+    if stats.camera_xy:
+        xy = np.array(list(stats.camera_xy.values()))
+        ax.scatter(xy[:, 0], xy[:, 1], s=3, color="black", zorder=3)
+    labels = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "> 9"]
+    handles = [Rectangle((0, 0), 1, 1, color=c) for c in OVERLAP_COLORS]
+    ax.legend(
+        handles[::-1],
+        labels[::-1],
+        loc="upper left",
+        bbox_to_anchor=(1.01, 1.0),
+        fontsize=7,
+        frameon=False,
+        handlelength=1.0,
+    )
+    _scale_bar(ax, extent)
+    return _png(fig)
+
+
+def _residuals_figure(stats: ReportStats) -> io.BytesIO | None:
+    if stats.residual_grid is None:
+        return None
+    cx, cy, mdx, mdy, count = stats.residual_grid
+    w, h = stats.residual_image_size
+    gx, gy = np.meshgrid(cx, cy)
+    ok = count > 0
+    magnitude = np.hypot(mdx, mdy)
+    largest = max(float(np.nanmax(magnitude[ok])), 1e-6)
+    scale = 0.06 * w / largest  # longest arrow = 6% of the image width
+    fig, ax = plt.subplots(figsize=(7.2, 7.2 * h / w))
+    ax.add_patch(Rectangle((0, 0), w, h, fill=False, lw=0.8, color="black"))
+    quiver = ax.quiver(
+        gx[ok],
+        gy[ok],
+        mdx[ok] * scale,
+        -mdy[ok] * scale,
+        magnitude[ok],
+        cmap="RdYlGn_r",
+        angles="xy",
+        scale_units="xy",
+        scale=1,
+        width=0.0028,
+        clim=(0, largest),
+    )
+    ax.set_xlim(-0.02 * w, 1.02 * w)
+    ax.set_ylim(1.13 * h, -0.02 * h)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    bar = _nice_length(largest)
+    ax.plot([w - bar * scale, w], [1.06 * h, 1.06 * h], color="black", lw=1.4)
+    ax.text(w - bar * scale / 2, 1.08 * h, f"{bar:g} pix".replace(".", ","), ha="center", va="top", fontsize=7)
+    fig.colorbar(quiver, ax=ax, shrink=0.6, pad=0.02, label="resíduo médio (pix)")
+    return _png(fig)
+
+
+def _camera_locations_figure(stats: ReportStats, ortho) -> io.BytesIO | None:
+    items = [i for i in stats.images if i.d_east_cm is not None and i.name in stats.camera_xy]
+    if not items:
+        return None
+    xy = np.array([stats.camera_xy[i.name] for i in items])
+    de = np.array([i.d_east_cm for i in items])
+    dn = np.array([i.d_north_cm for i in items])
+    du = np.array([i.d_up_cm for i in items])
+    fix = np.array([i.in_rmse for i in items])
+    ref = fix if fix.any() else np.ones_like(fix)
+    pad = 0.08 * max(np.ptp(xy[:, 0]), np.ptp(xy[:, 1]), 1.0)
+    extent = (xy[:, 0].min() - pad, xy[:, 0].max() + pad, xy[:, 1].min() - pad, xy[:, 1].max() + pad)
+    if ortho is not None:
+        oe = ortho[1]
+        extent = (min(extent[0], oe[0]), max(extent[1], oe[1]), min(extent[2], oe[2]), max(extent[3], oe[3]))
+    fig, ax = _map_figure(extent, width_in=6.6)
+    if ortho is not None:
+        ax.imshow(ortho[0], extent=ortho[1], alpha=0.6, interpolation="lanczos")
+    # Metashape's figure: ellipse axes = |dE| and |dN| times a magnification,
+    # color = dZ. The magnification makes the RMS XY error 2,5% of the map
+    # width. Only RTK FIX photos set the scales (a photo before the fix can
+    # be meters off and would shrink every other ellipse to nothing).
+    span = extent[1] - extent[0]
+    rms_xy = float(np.sqrt(np.mean(de[ref] ** 2 + dn[ref] ** 2))) / 100.0
+    magnification = 0.025 * span / max(rms_xy, 1e-4)
+    limit = max(float(np.abs(du[ref]).max()), 0.5)
+    levels = np.linspace(-limit, limit, 12)
+    cmap = plt.get_cmap("turbo", 11)
+    norm = BoundaryNorm(levels, cmap.N)
+    floor = 0.15 * rms_xy  # keeps a photo with ~0 error visible
+    for k in np.flatnonzero(ref):
+        width = 2 * max(abs(de[k]) / 100.0, floor) * magnification
+        height = 2 * max(abs(dn[k]) / 100.0, floor) * magnification
+        ax.add_patch(
+            Ellipse(
+                xy[k], width, height, facecolor=cmap(norm(du[k])), edgecolor="black", lw=0.3, alpha=0.95, zorder=3
+            )
+        )
+        ax.plot(*xy[k], marker=".", color="black", markersize=1.5, zorder=4)
+    middle = (extent[0] + extent[1]) / 2
+    for n, k in enumerate(np.flatnonzero(~fix)):
+        ax.scatter(*xy[k], s=40, marker="D", facecolors="none", edgecolors="#C62828", lw=1.2, zorder=5)
+        left_side = xy[k, 0] > middle  # label towards the map center, never off the edge
+        ax.annotate(
+            f"sem FIX: {np.hypot(de[k], dn[k]):.0f} cm XY, {du[k]:+.0f} cm Z".replace(".", ","),
+            xy[k],
+            textcoords="offset points",
+            xytext=(-6 if left_side else 6, 4 + 9 * (n % 3)),
+            ha="right" if left_side else "left",
+            fontsize=6,
+            bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "none", "pad": 1},
+            color="#C62828",
+            zorder=5,
+        )
+    sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+    bar = fig.colorbar(sm, ax=ax, shrink=0.55, pad=0.02, ticks=levels[::2])
+    bar.set_label("dZ (cm)")
+    bar.ax.set_yticklabels([f"{v:.1f}".replace(".", ",") for v in levels[::2]])
+    ax.text(
+        0.99,
+        0.99,
+        f"elipses: dX e dY ampliados {magnification:,.0f} x".replace(",", "."),
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=7,
+        bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "none", "pad": 2},
+        zorder=10,
+    )
+    _scale_bar(ax, extent)
+    return _png(fig)
+
+
+def _dem_figure(path: str) -> tuple[io.BytesIO, float | None, float | None]:
+    z, _mask, extent = _read_preview(path, 1, 1400)
+    z = np.ma.masked_invalid(np.ma.asarray(z, dtype=float))
+    fig, ax = _map_figure(extent)
+    low = high = None
+    if z.count():
+        low, high = float(z.min()), float(z.max())
+        cell = (extent[1] - extent[0]) / z.shape[1]
+        shade = LightSource(azdeg=315, altdeg=45).hillshade(z.filled(float(z.mean())), dx=cell, dy=cell, vert_exag=2)
+        image = ax.imshow(z, cmap="turbo", extent=extent, vmin=low, vmax=high, interpolation="bilinear")
+        ax.imshow(np.ma.array(shade, mask=np.ma.getmaskarray(z)), cmap="gray", alpha=0.25, extent=extent)
+        bar = fig.colorbar(image, ax=ax, shrink=0.55, pad=0.02, ticks=[low, high])
+        bar.ax.set_yticklabels([f"{low:.0f} m", f"{high:.0f} m"])
+    _scale_bar(ax, extent)
+    return _png(fig), low, high
+
+
+# -- document --------------------------------------------------------------------
+
+
+class _Builder:
+    def __init__(self, project: Project, level, stats: ReportStats, warnings: list[str]):
+        self.project = project
+        self.level = level
+        self.stats = stats
+        self.warnings = warnings
+        self.font, self.bold = _register_fonts()
+        base = getSampleStyleSheet()
+        navy = colors.HexColor(theme.PRIMARY_DARK)
+        self.title_style = ParagraphStyle(
+            "title", parent=base["Title"], fontName=self.bold, fontSize=22, textColor=navy, alignment=TA_CENTER
+        )
+        self.subtitle = ParagraphStyle(
+            "subtitle", parent=base["BodyText"], fontName=self.bold, fontSize=11, alignment=TA_CENTER, leading=16
+        )
+        self.h1 = ParagraphStyle(
+            "h1", parent=base["Heading1"], fontName=self.bold, fontSize=18, textColor=navy, spaceAfter=12
+        )
+        self.h2 = ParagraphStyle(
+            "h2", parent=base["Heading2"], fontName=self.bold, fontSize=11, textColor=navy, spaceBefore=12
+        )
+        self.body = ParagraphStyle("body", parent=base["BodyText"], fontName=self.font, fontSize=9, leading=12)
+        self.caption = ParagraphStyle("caption", parent=self.body, alignment=TA_CENTER, fontSize=8.5, leading=11)
+        self.small = ParagraphStyle("small", parent=self.body, fontSize=7.5, leading=9.5)
+        self.cell = ParagraphStyle("cell", parent=self.body, fontSize=8.5, leading=10.5)
+        self.story: list = []
+        self.ortho = None
+        if project.ortho and Path(project.ortho.raster_path).is_file():
+            self.ortho = _ortho_rgba(project.ortho.raster_path)
+
+    def p(self, text: str, style=None) -> None:
+        self.story.append(Paragraph(text, style or self.body))
+
+    def boxed_table(self, rows: list[list], widths=None, extra=None) -> Table:
+        """Grid table with a bold header row, like Metashape's tables."""
+        data = [[Paragraph(f"<b>{c}</b>", self.cell) for c in rows[0]]]
+        data += [[c if isinstance(c, Paragraph) else Paragraph(str(c), self.cell) for c in row] for row in rows[1:]]
+        table = Table(data, colWidths=widths, repeatRows=1, hAlign="CENTER")
+        table.setStyle(
+            TableStyle(
+                [
+                    ("GRID", (0, 0), (-1, -1), 0.6, colors.HexColor("#333333")),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ]
+                + (extra or [])
+            )
+        )
+        return table
+
+    def pairs_table(self, rows: list[tuple[str, str, str, str]]) -> Table:
+        """Borderless two-pair summary (Metashape's "Survey Data" block)."""
+        data = [[Paragraph(c, self.body) for c in row] for row in rows]
+        widths = [0.22 * PAGE_WIDTH, 0.25 * PAGE_WIDTH, 0.27 * PAGE_WIDTH, 0.26 * PAGE_WIDTH]
+        table = Table(data, colWidths=widths)
+        table.setStyle(TableStyle([("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2)]))
+        return table
+
+    # -- pages ---------------------------------------------------------------
+
+    def cover(self) -> None:
+        p = self.project
+        when = (p.processing.finished_at or p.processing.started_at) if p.processing else ""
+        try:
+            date = datetime.fromisoformat(when).strftime("%d/%m/%Y %H:%M") if when else ""
+        except ValueError:
+            date = ""
+        date = date or datetime.now().strftime("%d/%m/%Y %H:%M")
+        self.story += [
+            Spacer(1, 1.4 * cm),
+            Paragraph("Relatório de Processamento", self.title_style),
+            Spacer(1, 0.3 * cm),
+            Paragraph(f"Projeto {p.name}", self.subtitle),
+            Paragraph(date, self.subtitle),
+            Paragraph(f"Nível {self.level.label} — {self.level.summary}", self.subtitle),
+            Spacer(1, 0.8 * cm),
+        ]
+        if self.ortho is not None:
+            self.story.append(_image(_cover_figure(*self.ortho), PAGE_WIDTH, max_height=18.5 * cm))
+
+    def survey_data(self) -> None:
+        p, s = self.project, self.stats
+        self.story += [PageBreak(), Paragraph("Dados do levantamento", self.h1)]
+        if s.overlap is not None:
+            self.story.append(_image(_overlap_figure(s), PAGE_WIDTH * 0.9, max_height=11 * cm))
+            self.p("Fig. 1. Posições das câmeras e sobreposição das fotos (fotos por ponto do terreno).", self.caption)
+            self.story.append(Spacer(1, 0.4 * cm))
+        aligned = _fmt(p.sfm.num_registered) if p.sfm else NA
+        self.story.append(
+            self.pairs_table(
+                [
+                    ("Fotos:", _fmt(len(p.images)), "Fotos alinhadas:", aligned),
+                    (
+                        "Altura de voo:",
+                        _fmt(s.mean_flying_height_m, 0, "m"),
+                        "Tie points:",
+                        _fmt(s.num_points3d) if s.num_points3d else NA,
+                    ),
+                    (
+                        "Resolução:",
+                        _fmt(s.gsd_cm, 2, "cm/pix"),
+                        "Projeções:",
+                        _fmt(s.num_observations) if s.num_observations else NA,
+                    ),
+                    (
+                        "Área coberta:",
+                        _fmt(s.covered_area_ha, 2, "ha"),
+                        "Erro de reprojeção:",
+                        _fmt(s.reprojection_rms_px, 3, "pix"),
+                    ),
+                ]
+            )
+        )
+        sensor = _camera_sensor(p)
+        if sensor:
+            self.story.append(Spacer(1, 0.4 * cm))
+            self.story.append(
+                self.boxed_table(
+                    [
+                        ["Modelo da câmera", "Resolução", "Distância focal", "Tamanho do pixel", "Pré-calibrada"],
+                        [
+                            sensor["model"],
+                            sensor["resolution"],
+                            _fmt(sensor["focal_mm"], 2, "mm"),
+                            _pixel_text(sensor),
+                            "Não",
+                        ],
+                    ]
+                )
+            )
+            self.p("Tabela 1. Câmera.", self.caption)
+        self.quality_check()
+
+    def quality_check(self) -> None:
+        p, s = self.project, self.stats
+        rows = [["Verificação de qualidade", "Valor", "Situação", "Critério (Pix4D)"]]
+        statuses = []
+
+        def add(item, value, status, rule):
+            badge = Paragraph(f"<font color='white'><b>{STATUS_TEXT[status]}</b></font>", self.cell)
+            rows.append([item, value, badge, rule])
+            statuses.append(status)
+
+        if s.median_keypoints is not None:
+            k = s.median_keypoints
+            add(
+                "Pontos-chave por foto (mediana)",
+                _fmt(int(k)),
+                "ok" if k > 10000 else "atencao" if k >= 500 else "ruim",
+                "verde > 10.000",
+            )
+        if p.sfm:
+            frac = p.sfm.num_registered / max(1, p.sfm.num_images_input)
+            add(
+                "Fotos alinhadas",
+                f"{frac:.0%}",
+                "ok" if frac > 0.95 else "atencao" if frac >= 0.60 else "ruim",
+                "verde > 95%",
+            )
+        change = _focal_change(p)
+        if change is not None:
+            add(
+                "Variação da focal na calibração",
+                f"{change:.2%}".replace(".", ","),
+                "ok" if change < 0.05 else "atencao" if change <= 0.20 else "ruim",
+                "verde < 5%",
+            )
+        if s.median_tie_points is not None:
+            t = s.median_tie_points
+            add(
+                "Correspondências por foto (mediana)",
+                _fmt(int(t)),
+                "ok" if t > 1000 else "atencao" if t >= 100 else "ruim",
+                "verde > 1.000",
+            )
+        mean_error = p.ba.mean_reprojection_error_px if p.ba else None
+        if mean_error is not None:
+            add(
+                "Erro médio de reprojeção",
+                _fmt(mean_error, 3, "pix"),
+                "ok" if mean_error < 1.0 else "atencao" if mean_error <= 2.0 else "ruim",
+                "verde < 1 pix",
+            )
+        if p.ba and p.ba.rmse_xy_cm is not None:
+            sigma_cm = p.gnss_accuracy.accuracy.xy_sigma_m * 100
+            add(
+                "Câmeras x GNSS (RMS XY)",
+                _fmt(p.ba.rmse_xy_cm, 1, "cm"),
+                "atencao" if p.ba.rmse_xy_cm <= 3 * sigma_cm else "ruim",
+                "sem pontos de controle: amarelo, validar em campo",
+            )
+        if len(rows) == 1:
+            return
+        extra = [("BACKGROUND", (2, i + 1), (2, i + 1), STATUS_COLORS[st]) for i, st in enumerate(statuses)]
+        widths = [0.37 * PAGE_WIDTH, 0.15 * PAGE_WIDTH, 0.13 * PAGE_WIDTH, 0.35 * PAGE_WIDTH]
+        self.story.append(Spacer(1, 0.4 * cm))
+        self.story.append(self.boxed_table(rows, widths, extra))
+        self.p("Tabela 2. Verificação de qualidade.", self.caption)
+
+    def calibration(self) -> None:
+        p, s = self.project, self.stats
+        if not p.ba or not p.ba.camera_calibration:
+            return
+        self.story += [PageBreak(), Paragraph("Calibração da câmera", self.h1)]
+        sensor = _camera_sensor(p)
+        figure = _residuals_figure(s)
+        if figure is not None:
+            self.story.append(_image(figure, PAGE_WIDTH * 0.88, max_height=9.5 * cm))
+            self.p(f"Fig. 2. Resíduos na imagem para {sensor.get('model', 'a câmera')}.", self.caption)
+            self.story.append(Spacer(1, 0.4 * cm))
+        if sensor:
+            self.p(f"<b>{sensor['model']}</b>")
+            self.p(
+                f"{sensor['count']} fotos. Modelo OPENCV: focal, centro óptico, distorção radial (k1, k2) "
+                "e tangencial (p1, p2), calibrados no ajuste junto com o RTK."
+            )
+            self.story.append(Spacer(1, 0.15 * cm))
+            self.story.append(
+                self.pairs_table(
+                    [
+                        ("<b>Tipo</b>", "<b>Resolução</b>", "<b>Distância focal</b>", "<b>Tamanho do pixel</b>"),
+                        ("Frame", sensor["resolution"], _fmt(sensor["focal_mm"], 2, "mm"), _pixel_text(sensor)),
+                    ]
+                )
+            )
+            self.story.append(Spacer(1, 0.3 * cm))
+        for data in p.ba.camera_calibration.values():
+            names = [n.strip() for n in data["params_info"].split(",")]
+            rows = [["", "Inicial", "Calibrado", "Variação"]]
+            for name, a, b in zip(names, data["initial_params"], data["params"]):
+                digits = 3 if name in ("f", "fx", "fy", "cx", "cy") else 6
+                if name in ("f", "fx", "fy") and a:
+                    change = f"{(b - a) / a:+.3%}".replace(".", ",")
+                else:
+                    change = _fmt(b - a, digits)
+                rows.append([f"<b>{name}</b>", _fmt(float(a), digits), _fmt(float(b), digits), change])
+            widths = [0.16 * PAGE_WIDTH, 0.27 * PAGE_WIDTH, 0.27 * PAGE_WIDTH, 0.22 * PAGE_WIDTH]
+            self.story.append(self.boxed_table(rows, widths))
+            self.p("Tabela 3. Coeficientes de calibração (focal e centro óptico em pixels).", self.caption)
+        for note in p.ba.intrinsics_notes:
+            self.p("Aviso: " + note, self.small)
+
+    def camera_locations(self) -> None:
+        p, s = self.project, self.stats
+        if not p.ba:
+            return
+        self.story += [PageBreak(), Paragraph("Posição das câmeras", self.h1)]
+        figure = _camera_locations_figure(s, self.ortho)
+        if figure is not None:
+            self.story.append(_image(figure, PAGE_WIDTH * 0.9, max_height=12.5 * cm))
+            self.p("Fig. 3. Posições das câmeras e diferenças para o GNSS (RTK).", self.caption)
+            self.p(
+                "A cor da elipse indica a diferença em Z; a forma, as diferenças em X e Y. "
+                "O ponto preto é a posição da câmera após o ajuste.",
+                self.caption,
+            )
+            self.story.append(Spacer(1, 0.4 * cm))
+        ba = p.ba
+        self.story.append(
+            self.boxed_table(
+                [
+                    ["Erro X (cm)", "Erro Y (cm)", "Erro Z (cm)", "Erro XY (cm)", "Total (cm)", "Máximo (cm)"],
+                    [
+                        _fmt(ba.rmse_x_cm, 2),
+                        _fmt(ba.rmse_y_cm, 2),
+                        _fmt(ba.rmse_z_cm, 2),
+                        _fmt(ba.rmse_xy_cm, 2),
+                        _fmt(ba.rmse_total_cm, 2),
+                        _fmt(ba.max_error_cm, 2),
+                    ],
+                ]
+            )
+        )
+        self.p("Tabela 4. Erro médio (RMS) das posições das câmeras, fotos com RTK FIX.", self.caption)
+        self.p("X - Leste, Y - Norte, Z - Altitude elipsoidal.", self.caption)
+        self.story.append(Spacer(1, 0.3 * cm))
+        self.p(
+            f"Precisão do GNSS usada no ajuste: {_fmt(p.gnss_accuracy.accuracy.xy_sigma_m * 100, 1, 'cm')} (XY) e "
+            f"{_fmt(p.gnss_accuracy.accuracy.z_sigma_m * 100, 1, 'cm')} (Z), ou o desvio informado pelo RTK da foto, "
+            f"se maior. {ba.num_images_with_gnss_prior} de {ba.num_images_adjusted} fotos entraram como observação GNSS.",
+            self.small,
+        )
+        if ba.images_excluded_from_rmse:
+            self.p(
+                "Sem RTK FIX (posicionadas só pelos tie points, fora do RMSE): "
+                + ", ".join(ba.images_excluded_from_rmse)
+                + ".",
+                self.small,
+            )
+        self.p(
+            "Estes números medem a coerência entre as fotos e o RTK. A exatidão no terreno só é comprovada com "
+            "pontos de verificação medidos em campo.",
+            self.small,
+        )
+
+    def elevation_model(self) -> None:
+        p, s = self.project, self.stats
+        if not p.dem or not Path(p.dem.raster_path).is_file():
+            return
+        self.story += [PageBreak(), Paragraph("Modelo digital de elevação", self.h1)]
+        figure, low, high = _dem_figure(p.dem.raster_path)
+        self.story.append(_image(figure, PAGE_WIDTH * 0.9, max_height=14 * cm))
+        self.p("Fig. 4. Modelo digital de elevação (superfície) reconstruído.", self.caption)
+        self.story.append(Spacer(1, 0.4 * cm))
+        d = p.dem
+        covered = d.width_px * d.height_px * (1 - d.nodata_fraction)
+        interpolated = f"{d.num_cells_interpolated / covered:.1%}".replace(".", ",") if covered else NA
+        self.story.append(
+            self.pairs_table(
+                [
+                    (
+                        "Resolução:",
+                        _fmt(d.resolution_m * 100, 0, "cm/pix"),
+                        "Densidade de pontos:",
+                        _fmt(s.dense_density_per_m2, 1, "pontos/m²"),
+                    ),
+                    (
+                        "Altitudes:",
+                        f"{_fmt(low, 1)} a {_fmt(high, 1, 'm')}" if low is not None else NA,
+                        "Células interpoladas:",
+                        interpolated,
+                    ),
+                ]
+            )
+        )
+        self.story.append(Spacer(1, 0.2 * cm))
+        self.p("Altitude elipsoidal (GRS80), a mesma referência do GNSS do drone.", self.small)
+
+    def parameters(self) -> None:
+        from htrmapper.geo.crs import CoordinateReferenceSystem
+        from htrmapper.pipeline.auto import _system_lines
+
+        p, s, level = self.project, self.stats, self.level
+        self.story += [PageBreak(), Paragraph("Parâmetros de processamento", self.h1)]
+        steps = p.processing.steps_done if p.processing else {}
+
+        def took(key):
+            return _duration(steps[key]["seconds"]) if key in steps else NA
+
+        ba = p.ba
+        size = level.sfm.max_image_size
+        view = level.ortho.max_view_angle_deg
+        rows: list[tuple[int, str, str]] = [
+            (0, "Geral", ""),
+            (1, "Fotos", _fmt(len(p.images))),
+            (1, "Fotos alinhadas", _fmt(p.sfm.num_registered) if p.sfm else NA),
+            (
+                1,
+                "Sistema de coordenadas",
+                f"{CoordinateReferenceSystem(p.crs.project_epsg).name} (EPSG:{p.crs.project_epsg})",
+            ),
+            (1, "Referência vertical", "Altitude elipsoidal (GRS80)"),
+            (1, "Georreferenciamento", "RTK das câmeras, sem pontos de controle"),
+            (1, "Nível de processamento", f"{level.label} — {level.summary}"),
+            (0, "Alinhamento", ""),
+            (1, "Pontos-chave por foto (limite)", _fmt(level.sfm.key_point_limit)),
+            (1, "Tamanho das fotos na extração", "original" if size < 0 else f"{size} pix"),
+            (1, "Pares por foto (vizinhas, pelo GNSS)", _fmt(level.sfm.spatial_max_neighbors)),
+            (1, "Tempo", took("alinhar")),
+            (0, "Ajuste com GNSS (tie points)", ""),
+            (
+                1,
+                "Tie points",
+                f"{_fmt(s.num_points3d)} (de {_fmt(ba.tie_points_before_cleanup)} antes da limpeza)"
+                if ba and ba.tie_points_before_cleanup
+                else _fmt(s.num_points3d),
+            ),
+            (1, "Erro de reprojeção RMS", _fmt(s.reprojection_rms_px, 3, "pix")),
+            (1, "Erro de reprojeção máximo", _fmt(s.reprojection_max_px, 2, "pix")),
+            (1, "Fotos por tie point (média)", _fmt(s.mean_track_length, 2)),
+            (1, "Parâmetros calibrados", ", ".join(_REFINED.get(n, n) for n in ba.intrinsics_refined) or "nenhum")
+            if ba
+            else (1, "Parâmetros calibrados", NA),
+            (1, "Observações GNSS", f"{ba.num_images_with_gnss_prior} fotos (só RTK FIX)" if ba else NA),
+            (
+                1,
+                "Limpeza de tie points",
+                f"{len(ba.tie_point_cleanup_passes)} passes" if ba and ba.tie_point_cleanup_passes else "não",
+            ),
+            (1, "Convergência", ("sim" if ba.converged else "NÃO") if ba else NA),
+            (1, "Tempo", took("ajustar")),
+            (0, "Nuvem densa", ""),
+            (1, "Pontos", _fmt(p.mvs.num_points) if p.mvs else NA),
+            (1, "Qualidade", _QUALITY.get(p.mvs.quality, p.mvs.quality) if p.mvs else NA),
+            (1, "Densidade", _fmt(s.dense_density_per_m2, 1, "pontos/m²")),
+            (1, "Tempo", took("densa")),
+            (0, "Modelo digital de elevação", ""),
+            (1, "Tamanho", f"{_fmt(p.dem.width_px)} x {_fmt(p.dem.height_px)}" if p.dem else NA),
+            (1, "Resolução", _fmt(p.dem.resolution_m * 100, 0, "cm/pix") if p.dem else NA),
+            (1, "Picos removidos", f"{_fmt(p.dem.num_cells_despiked)} células" if p.dem else NA),
+            (1, "Interpolação", "só buracos internos, sem extrapolar para fora da área"),
+            (1, "Arquivo", Path(p.dem.raster_path).name if p.dem else NA),
+            (1, "Tempo", took("dem")),
+            (0, "Ortomosaico", ""),
+            (1, "Tamanho", f"{_fmt(p.ortho.width_px)} x {_fmt(p.ortho.height_px)}" if p.ortho else NA),
+            (1, "Resolução", _fmt(p.ortho.resolution_m * 100, 2, "cm/pix") if p.ortho else NA),
+            (1, "Superfície", "DEM"),
+            (
+                1,
+                "Mistura",
+                "foto mais vertical em cada pixel" + (f", até {view:g}° da vertical" if view else ""),
+            ),
+            (1, "Fotos usadas", _fmt(p.ortho.num_cameras_used) if p.ortho else NA),
+            (1, "Arquivo", Path(p.ortho.raster_path).name if p.ortho else NA),
+            (1, "Tempo", took("ortho")),
+            (0, "Sistema", ""),
+            (1, "Software", f"HTRMapper {p.processing.software_version if p.processing else ''}".strip()),
+        ]
+        for line in _system_lines():
+            # "CPU: ..." / "GPU: ..." / "Python 3.x em ..." / "pycolmap 4.x (CUDA: sim)"
+            key, _, value = line.partition(": ") if line[:4] in ("CPU:", "GPU:") else line.partition(" ")
+            rows.append((1, key, value))
+        total = sum(v.get("seconds", 0) for v in steps.values())
+        if total:
+            rows.append((1, "Tempo total de processamento", _duration(total)))
+        data = []
+        for indent, key, value in rows:
+            style = ParagraphStyle(f"k{indent}", parent=self.cell, leftIndent=14 * indent)
+            data.append([Paragraph(f"<b>{key}</b>" if indent == 0 else key, style), Paragraph(value, self.cell)])
+        table = Table(data, colWidths=[0.45 * PAGE_WIDTH, 0.55 * PAGE_WIDTH])
+        table.setStyle(TableStyle([("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1)]))
+        self.story.append(table)
+        if self.warnings:
+            self.story.append(Paragraph("Avisos", self.h2))
+            for warning in self.warnings:
+                self.p("• " + warning, self.small)
 
 
 def write_pdf_report(
@@ -796,26 +824,24 @@ def write_pdf_report(
     stats = compute_report_stats(project, level.ortho.resolution_scale)
     builder = _Builder(project, level, stats, warnings or [])
     builder.cover()
-    builder.story.append(PageBreak())
-    builder.quality_check()
-    builder.previews()
-    builder.cameras()
+    builder.survey_data()
     builder.calibration()
-    builder.bundle_adjustment()
-    builder.products()
-    builder.parameters(log_path)
-    builder.appendix()
+    builder.camera_locations()
+    builder.elevation_model()
+    builder.parameters()
+    if log_path is not None:
+        builder.p(f"Log completo do processamento: {Path(log_path).name}", builder.small)
 
     font = builder.font
-    generated = datetime.now().strftime("%d/%m/%Y %H:%M")
 
     def decorate(canvas, doc) -> None:
         canvas.saveState()
-        canvas.setFont(font, 7.5)
+        canvas.setFont(font, 8)
         canvas.setFillColor(colors.HexColor(theme.TEXT_MUTED))
-        canvas.drawString(1.8 * cm, A4[1] - 1.1 * cm, f"HTRMapper — Relatório de Processamento — {project.name}")
+        if doc.page > 1:
+            canvas.drawString(1.8 * cm, A4[1] - 1.0 * cm, f"Relatório de Processamento — {project.name}")
         canvas.drawRightString(A4[0] - 1.8 * cm, 1.0 * cm, f"Página {doc.page}")
-        canvas.drawString(1.8 * cm, 1.0 * cm, f"Gerado em {generated}")
+        canvas.drawString(1.8 * cm, 1.0 * cm, "HTRMapper")
         canvas.restoreState()
 
     path = Path(path)
@@ -825,13 +851,10 @@ def write_pdf_report(
         pagesize=A4,
         leftMargin=1.8 * cm,
         rightMargin=1.8 * cm,
-        topMargin=1.6 * cm,
+        topMargin=1.5 * cm,
         bottomMargin=1.6 * cm,
         title=f"Relatório de Processamento — {project.name}",
         author="HTRMapper",
     )
     doc.build(builder.story, onFirstPage=decorate, onLaterPages=decorate)
     return path
-
-
-__all__ = ["KeepTogether", "write_pdf_report"]

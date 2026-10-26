@@ -21,7 +21,6 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
-    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -53,6 +52,7 @@ from htrmapper.geo.crs import (
     GeodeticTransformer,
     wgs84,
 )
+from htrmapper.gui.file_dialogs import choose_folder, choose_open_file, choose_save_file
 from htrmapper.gui.worker import PipelineWorker
 from htrmapper.io.image_import import import_folder
 from htrmapper.mvs.dense import MvsConfig, run_dense_reconstruction
@@ -526,7 +526,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_import_clicked(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Selecionar pasta de imagens")
+        folder = choose_folder(self, "Selecionar pasta de imagens")
         if not folder:
             return
         records, report = import_folder(Path(folder))
@@ -550,7 +550,7 @@ class MainWindow(QMainWindow):
         self._sync_ui_to_project_state()
 
     def _on_open_project_clicked(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Abrir projeto", "", "Projeto HTRMapper (*.json)")
+        path = choose_open_file(self, "Abrir projeto", "", "Projeto HTRMapper (*.json)")
         if not path:
             return
         try:
@@ -563,7 +563,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Projeto aberto", f"Projeto carregado de:\n{path}")
 
     def _on_save_project_clicked(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
+        path = choose_save_file(
             self, "Salvar projeto", f"{self.project.name}.json", "Projeto HTRMapper (*.json)"
         )
         if not path:
@@ -572,7 +572,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Projeto salvo", f"Projeto salvo em:\n{path}")
 
     def _on_generate_report_clicked(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
+        path = choose_save_file(
             self, "Gerar relatório", f"{self.project.name}_relatorio.html", "Relatório HTML (*.html)"
         )
         if not path:
@@ -643,7 +643,7 @@ class MainWindow(QMainWindow):
         if not ok:
             return
 
-        workdir = QFileDialog.getExistingDirectory(
+        workdir = choose_folder(
             self, "Selecionar pasta de trabalho para o alinhamento (banco COLMAP, reconstrução)"
         )
         if not workdir:
@@ -692,7 +692,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Ajuste (GNSS)", "Execute o alinhamento (SfM) primeiro.")
             return
 
-        workdir = QFileDialog.getExistingDirectory(
+        workdir = choose_folder(
             self, "Selecionar pasta de trabalho para o ajuste (reconstrução refinada)"
         )
         if not workdir:
@@ -759,7 +759,7 @@ class MainWindow(QMainWindow):
         if not ok:
             return
 
-        workdir = QFileDialog.getExistingDirectory(self, "Selecionar pasta de trabalho para a nuvem densa")
+        workdir = choose_folder(self, "Selecionar pasta de trabalho para a nuvem densa")
         if not workdir:
             return
 
@@ -827,7 +827,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "DEM", f"Resolução inválida: {resolution_str!r}")
                 return
 
-        output_path, _ = QFileDialog.getSaveFileName(
+        output_path = choose_save_file(
             self, "Salvar DEM", f"{self.project.name}_dem.tif", "GeoTIFF (*.tif)"
         )
         if not output_path:
@@ -896,7 +896,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Ortomosaico", f"Resolução inválida: {resolution_str!r}")
                 return
 
-        output_path, _ = QFileDialog.getSaveFileName(
+        output_path = choose_save_file(
             self, "Salvar ortomosaico", f"{self.project.name}_ortho.tif", "GeoTIFF (*.tif)"
         )
         if not output_path:

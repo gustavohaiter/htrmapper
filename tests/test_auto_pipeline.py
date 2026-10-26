@@ -10,6 +10,7 @@ small synthetic flight.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import time
 from pathlib import Path
@@ -164,6 +165,9 @@ def test_full_run_produces_products_report_and_log(photos, tmp_path, fake_gpu):
         assert Path(result.products[key]).is_file()
     pdf = Path(result.products["relatorio"]).read_bytes()
     assert pdf.startswith(b"%PDF") and b"%%EOF" in pdf[-1024:] and len(pdf) > 50_000
+    # Compact, Metashape-like: cover, survey data, calibration, cameras, DEM, parameters.
+    pages = len(re.findall(rb"/Type\s*/Page[^s]", pdf))
+    assert 5 <= pages <= 7
 
     project = Project.load(out / "projeto.json")
     assert project.crs.project_epsg == 31983  # picked from the photos' position

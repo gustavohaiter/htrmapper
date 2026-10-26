@@ -375,19 +375,19 @@ def _implausible_intrinsics(
         if focal_change > config.max_focal_change_ratio:
             focal_bad = True
             notes.append(
-                f"camera {camera_id}: focal length moved {focal_change:.1%} "
-                f"({initial.mean_focal_length():.1f} -> {camera.mean_focal_length():.1f} px), above the "
-                f"{config.max_focal_change_ratio:.0%} limit; re-adjusted with focal length fixed"
+                f"câmera {camera_id}: a focal variou {focal_change:.1%} "
+                f"({initial.mean_focal_length():.1f} -> {camera.mean_focal_length():.1f} px), acima do limite de "
+                f"{config.max_focal_change_ratio:.0%}; reajustada com a focal fixa"
             )
         offset_x = abs(camera.principal_point_x - camera.width / 2.0) / camera.width
         offset_y = abs(camera.principal_point_y - camera.height / 2.0) / camera.height
         if max(offset_x, offset_y) > config.max_principal_point_offset_ratio:
             principal_point_bad = True
             notes.append(
-                f"camera {camera_id}: principal point ({camera.principal_point_x:.1f}, "
-                f"{camera.principal_point_y:.1f}) is {max(offset_x, offset_y):.1%} of the image size from the "
-                f"center, above the {config.max_principal_point_offset_ratio:.0%} limit; re-adjusted with "
-                "principal point fixed"
+                f"câmera {camera_id}: o centro óptico ({camera.principal_point_x:.1f}, "
+                f"{camera.principal_point_y:.1f}) ficou a {max(offset_x, offset_y):.1%} do tamanho da imagem a partir "
+                f"do centro, acima do limite de {config.max_principal_point_offset_ratio:.0%}; reajustada com o "
+                "centro óptico fixo"
             )
     return focal_bad, principal_point_bad, notes
 
@@ -504,7 +504,7 @@ def run_gnss_weighted_bundle_adjustment(
                 # Thinner tie points made the lens drift: keep the result
                 # without cleanup rather than an implausible calibration.
                 intrinsics_notes.append(
-                    "tie point cleanup discarded, it let the intrinsics drift out of bounds: " + "; ".join(notes)
+                    "limpeza de tie points descartada, ela deixou a calibração sair dos limites: " + "; ".join(notes)
                 )
                 cleanup_passes = []
                 reconstruction, summary, gnss_by_image_id = solve_fresh()

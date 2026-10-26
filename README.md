@@ -194,7 +194,9 @@ como resolver isso também.
 ## Uso — processamento automático
 
 Na janela (`htrmapper-gui` ou o atalho do Windows): pasta das fotos, pasta de
-saída, nível e **Processar**. Pelo terminal, o mesmo:
+saída, nível e **Processar**. Os botões "Escolher pasta…" abrem o diálogo padrão do
+Windows; o relatório PDF segue o formato compacto do relatório do Metashape
+(6 páginas). Pelo terminal, o mesmo:
 
 ```bash
 htrmapper processar /caminho/das/fotos --saida /caminho/da/saida --nivel medio

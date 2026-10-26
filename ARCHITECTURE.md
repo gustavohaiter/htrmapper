@@ -1982,3 +1982,66 @@ No ortomosaico entrou também um limite exato: depois que cada pixel de um
 bloco já tem duas vistas, uma foto cujo melhor ângulo possível sobre o bloco
 não supera a pior segunda vista é pulada inteira. A saída é idêntica bit a
 bit. O log passou a registrar o andamento do ortomosaico a cada 10%.
+
+## 34. Relatório compacto, diálogos do Windows e a nova janela
+
+**Relatório PDF (`report/pdf.py`), no formato do relatório do Metashape.**
+O relatório de 12 páginas (com o anexo foto a foto) virou um de 6 páginas,
+na ordem e no visual do Metashape:
+
+1. Capa: projeto, data, nível e o ortomosaico com barra de escala e norte.
+2. Dados do levantamento: posições das câmeras sobre o mapa de sobreposição
+   (paleta do Metashape, 1 a > 9 fotos), o bloco de números (fotos,
+   alinhadas, altura de voo, tie points, GSD, projeções, área, erro de
+   reprojeção RMS), a câmera (modelo, resolução, focal, pixel em µm pelo
+   fator de corte do EXIF) e a verificação de qualidade com os critérios do
+   Pix4D.
+3. Calibração: resíduos médios na imagem (vetores coloridos pelo tamanho,
+   com escala em pixels) e os coeficientes inicial/calibrado/variação.
+4. Posição das câmeras: elipses sobre o ortomosaico (eixos = erro em X e Y
+   ampliados, cor = erro em Z, só fotos em FIX definem as escalas; fotos sem
+   FIX marcadas com o erro escrito) e a tabela de RMS X, Y, Z, XY, total e
+   máximo.
+5. DEM colorido com sombreamento leve, resolução, densidade, altitudes e
+   células interpoladas.
+6. Parâmetros de processamento em lista hierárquica (geral, alinhamento,
+   ajuste, nuvem densa, DEM, ortomosaico, sistema), com o tempo de cada
+   etapa, e os avisos.
+
+`report/stats.py` passou a medir o erro de reprojeção RMS e máximo sobre
+todas as observações do ajuste (o "Reprojection error" do Metashape é RMS;
+a verificação de qualidade continua usando o erro médio, que é o critério do
+Pix4D) e guarda os centros das câmeras ajustadas para os mapas. Os avisos de
+calibração do ajuste (focal ou centro óptico fora do limite) passaram a ser
+escritos em português.
+
+**Diálogos de pasta e arquivo padrão Windows (`gui/file_dialogs.py`).** Dentro
+do WSL, o Qt não tem o diálogo do Windows: o que abria era o diálogo
+desenhado pelo próprio Qt, com as cores da janela (todo azul) e caminhos do
+Linux. Agora o programa pede ao Windows, pelo `powershell.exe`, o diálogo
+padrão do Explorer: `IFileOpenDialog` com `FOS_PICKFOLDERS` para pastas (o
+moderno, não a árvore antiga do `FolderBrowserDialog`) e os
+`OpenFileDialog`/`SaveFileDialog` para arquivos. O auxiliar em C# é
+compilado na primeira vez e guardado em
+`%LOCALAPPDATA%\HTRMapper\HTRMapperDialogs_v1.dll`; o caminho escolhido volta
+em base64 (nenhuma página de código do console estraga acentos) e é
+convertido com `wslpath -u`. A janela do Qt continua repintando enquanto o
+diálogo está aberto (QProcess + QEventLoop) e fica desabilitada até ele
+fechar. Fora do WSL, ou se o PowerShell falhar por qualquer motivo, usa o
+`QFileDialog` comum, sem herdar as cores da janela. O modo manual usa os
+mesmos diálogos.
+
+**Janela principal (`gui/auto_window.py`).** Mesma lógica, visual novo:
+cabeçalho com o logotipo (desenhado em código, `gui/branding.py`, o mesmo
+desenho do ícone do atalho) e o estado da GPU; cartões numerados 1-2-3 com
+uma linha de ajuda cada; prévia da primeira foto, quantidade e tamanho; os
+níveis como cartões clicáveis lado a lado (ícone de barras, resumo,
+descrição e tempo estimado); botão Processar sempre visível. No andamento,
+cada etapa tem ícone de estado (número, girando, ✓, !), uma frase dizendo o
+que ela faz, uma barrinha de progresso enquanto roda e o tempo. Ao terminar,
+um cartão de resultado com a miniatura do ortomosaico (lida das pirâmides
+internas) e os botões para abrir o ortomosaico, o relatório e a pasta, sem
+caixa de mensagem; no erro, o cartão fica vermelho, o log técnico abre
+sozinho e a caixa de erro continua aparecendo. O log técnico fica recolhido
+em "Detalhes técnicos" (a escolha é lembrada). Menu Ajuda → Como funciona
+explica as etapas.
