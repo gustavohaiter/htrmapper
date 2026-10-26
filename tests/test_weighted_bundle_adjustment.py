@@ -99,23 +99,51 @@ def test_fixed_intrinsics_option_keeps_the_phase2_lens(tmp_path: Path):
     assert next(iter(result.camera_calibration.values()))["params"] == pytest.approx(list(initial.params), abs=1e-9)
 
 
-def test_rtk_float_image_is_weighted_by_its_own_deviation_and_left_out_of_rmse(tmp_path: Path):
-    # A real flight's first two images were RTK FLOAT (std 17-47 cm) and
-    # several meters off; weighted like the 2 cm FIX images they pulled
-    # the block. Simulate one: 5 m off, flagged FLOAT with a 5 m std-dev.
-    project, reconstruction_path = _aligned_project_and_reconstruction(tmp_path)
-    _shift_image_position(project, "SYNTH_0000.JPG", (5.0, 0.0, 0.0))
+def _float_image_4m_off(project: Project) -> None:
+    """Like the real flight's first photo: RTK FLOAT, 4 m off horizontally
+    and 2.5 m vertically, while the drone reported only 17 / 47 cm."""
+    _shift_image_position(project, "SYNTH_0000.JPG", (-1.0, 4.0, 2.5))
     record = next(img for img in project.images if img.file_name == "SYNTH_0000.JPG")
     record.rtk_flag = "34"
-    record.rtk_std_lon_m = record.rtk_std_lat_m = record.rtk_std_hgt_m = 5.0
+    record.rtk_std_lon_m = record.rtk_std_lat_m = 0.17
+    record.rtk_std_hgt_m = 0.47
+
+
+def test_rtk_float_image_is_not_a_gnss_observation_and_left_out_of_rmse(tmp_path: Path):
+    project, reconstruction_path = _aligned_project_and_reconstruction(tmp_path)
+    _float_image_4m_off(project)
+    total = len(project.images)
 
     result = run_gnss_weighted_bundle_adjustment(project, reconstruction_path, tmp_path / "ba_out", BaConfig())
 
+    assert result.num_images_with_gnss_prior == total - 1
     float_residual = next(r for r in result.per_camera_residuals if r.image_name == "SYNTH_0000.JPG")
-    assert float_residual.xy_sigma_m == pytest.approx(5.0)
-    assert sum(v**2 for v in float_residual.residual_m) ** 0.5 > 2.0
+    # Placed by its tie points: its difference to the bad GNSS shows the full error.
+    assert sum(v**2 for v in float_residual.residual_m) ** 0.5 > 4.0
     assert result.images_excluded_from_rmse == ["SYNTH_0000.JPG"]
-    assert result.rmse_xy_cm < 10.0
+    assert result.rmse_xy_cm < 2.0
+
+
+def test_float_image_with_optimistic_deviation_pulls_the_block_when_used(tmp_path: Path):
+    """Why non-FIX photos are left out: used with the 17 cm the drone
+    reported, the 4 m error drags the FIX cameras away from their GNSS."""
+    project, reconstruction_path = _aligned_project_and_reconstruction(tmp_path)
+    _float_image_4m_off(project)
+
+    ignored = run_gnss_weighted_bundle_adjustment(project, reconstruction_path, tmp_path / "a", BaConfig())
+    used = run_gnss_weighted_bundle_adjustment(
+        project, reconstruction_path, tmp_path / "b", BaConfig(use_non_fix_priors=True)
+    )
+    assert used.num_images_with_gnss_prior == ignored.num_images_with_gnss_prior + 1
+    assert used.rmse_total_cm > 3 * ignored.rmse_total_cm
+
+
+def test_non_fix_photos_are_kept_when_too_few_have_a_fix(tmp_path: Path):
+    project, reconstruction_path = _aligned_project_and_reconstruction(tmp_path)
+    for record in project.images[2:]:
+        record.rtk_flag = "34"  # only two FIX photos: below MIN_FIX_PRIORS
+    result = run_gnss_weighted_bundle_adjustment(project, reconstruction_path, tmp_path / "ba_out", BaConfig())
+    assert result.num_images_with_gnss_prior == len(project.images)
 
 
 def test_prior_sigma_uses_the_configured_accuracy_as_a_floor():

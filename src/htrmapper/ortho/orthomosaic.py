@@ -568,7 +568,21 @@ def run_orthomosaic_generation(
                 # Nearest (most nadir) photos first: they win most pixels, so the
                 # angle test below lets the later ones skip most of the tile.
                 overlapping.sort(key=lambda e: float(np.hypot(*(e["center"][:2] - tile_center))))
+                tile_min_z = float(world_points[:, 2].min())
                 for entry in overlapping:
+                    # Once every pixel of the tile has two views, a photo can only
+                    # matter if its best possible angle over the tile (nearest
+                    # point of the tile box, lowest terrain) beats the worst
+                    # second view; otherwise it is skipped whole -- an exact
+                    # bound, the output does not change.
+                    worst_second = float(best2[terrain_idx].min())
+                    if np.isfinite(worst_second):
+                        cx, cy, cz = entry["center"]
+                        dx = max(tile_bbox[0] - cx, 0.0, cx - tile_bbox[1])
+                        dy = max(tile_bbox[2] - cy, 0.0, cy - tile_bbox[3])
+                        height = cz - tile_min_z
+                        if height > 0 and -np.arctan2(np.hypot(dx, dy), height) <= worst_second:
+                            continue
                     offsets = world_points - entry["center"]
                     score_all = -np.arctan2(np.hypot(offsets[:, 0], offsets[:, 1]), -offsets[:, 2])
                     # A photo can only change a pixel whose second-best view it

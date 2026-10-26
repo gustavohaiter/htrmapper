@@ -172,21 +172,20 @@ def _filter_outliers(x: np.ndarray, y: np.ndarray, z: np.ndarray) -> tuple[np.nd
 
 
 def _auto_resolution(x: np.ndarray, y: np.ndarray) -> float:
-    """AUTO_RESOLUTION_SPACING_FACTOR x the mean point spacing over the area
-    the points actually cover. The bounding box alone counts the empty
-    corners of an irregular field as covered (38% of it on the fazenda
-    20046 flight), which coarsens the cell well beyond the intended
-    factor; occupancy is measured on cells of 4x the bounding-box spacing
-    (about 16 points each where there is data)."""
-    bbox_area_m2 = (x.max() - x.min()) * (y.max() - y.min())
-    if bbox_area_m2 <= 0 or len(x) == 0:
+    """AUTO_RESOLUTION_SPACING_FACTOR x the mean point spacing over the
+    cloud's bounding box, rounded.
+
+    Measuring the spacing over the occupied area only (tried in the review
+    of ARCHITECTURE.md section 32) gave a finer cell on the real flight
+    (0.35 m instead of 0.50 m) but no extra information: dense clouds over
+    cane have clustered gaps, so 40.5% of the cells came out interpolated
+    instead of 30%, and three times as many spikes were removed. The
+    bounding-box figure is the one validated against Pix4D."""
+    area_m2 = (x.max() - x.min()) * (y.max() - y.min())
+    if area_m2 <= 0 or len(x) == 0:
         raise DemError("point cloud has zero spatial extent; cannot determine an automatic resolution")
-    cell = 4.0 * np.sqrt(bbox_area_m2 / len(x))
-    cols = ((x - x.min()) / cell).astype(np.int64)
-    rows = ((y - y.min()) / cell).astype(np.int64)
-    occupied_area_m2 = np.unique(rows * (cols.max() + 1) + cols).size * cell**2
-    resolution = np.sqrt(min(occupied_area_m2, bbox_area_m2) / len(x)) * AUTO_RESOLUTION_SPACING_FACTOR
-    # A round figure (0.40 m, not 0.397 m): products of different runs share
+    resolution = np.sqrt(area_m2 / len(x)) * AUTO_RESOLUTION_SPACING_FACTOR
+    # A round figure (0.50 m, not 0.5018 m): products of different runs share
     # the same grid, and the number reads plainly in the report.
     step = 0.05 if resolution >= 0.25 else 0.01
     return float(max(step, round(resolution / step) * step))

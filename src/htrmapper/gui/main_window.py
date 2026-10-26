@@ -730,7 +730,7 @@ class MainWindow(QMainWindow):
         ]
         if result.images_excluded_from_rmse:
             detail_lines.append(
-                "Fora do RMSE (sem RTK FIX, ponderadas pelo próprio desvio RTK): "
+                "Sem RTK FIX (posicionadas só pelos tie points, fora do RMSE): "
                 + ", ".join(result.images_excluded_from_rmse)
             )
 

@@ -460,12 +460,19 @@ class AutoProcessor:
         return seconds
 
     def _phase(self, key: str):
+        last_tenth = [-1]
+
         def callback(*args):
             if len(args) == 1:
                 logger.info("  %s", args[0])
                 self.callbacks.phase(key, str(args[0]))
             else:
-                self.callbacks.progress(key, int(args[0]), int(args[1]))
+                done, total = int(args[0]), int(args[1])
+                self.callbacks.progress(key, done, total)
+                tenth = 10 * done // max(1, total)
+                if tenth > last_tenth[0]:  # the log gets every 10%, not every tile
+                    last_tenth[0] = tenth
+                    logger.info("  %d%% (%d de %d blocos)", 10 * tenth, done, total)
 
         return callback
 

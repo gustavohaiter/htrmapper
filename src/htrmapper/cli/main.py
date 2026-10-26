@@ -173,7 +173,7 @@ def _cmd_adjust(args: argparse.Namespace) -> int:
     print(f"Max error: {result.max_error_cm:.3f} cm")
     if result.images_excluded_from_rmse:
         print(
-            f"Excluded from RMSE (no RTK FIX, weighted by their own RTK std-dev): "
+            f"No RTK FIX (not used as GNSS observations, placed by tie points; excluded from RMSE): "
             f"{', '.join(result.images_excluded_from_rmse)}"
         )
     print(f"Intrinsics refined: {', '.join(result.intrinsics_refined) or 'none (fixed)'}")

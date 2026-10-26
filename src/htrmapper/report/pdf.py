@@ -293,8 +293,9 @@ class _Builder:
         if errors:
             self.p(
                 "Posição de cada foto após o ajuste, com a diferença para a posição do GNSS (RTK) desenhada como "
-                "seta (ampliada) e colorida pela diferença vertical. Fotos sem RTK FIX (losango) entram no ajuste "
-                "com o próprio desvio do RTK e ficam fora do RMSE."
+                "seta (ampliada) e colorida pela diferença vertical. Fotos sem RTK FIX (losango vermelho) não "
+                "entram como observação GNSS no ajuste: ficam no lugar pelos tie points, e a diferença delas mostra "
+                "o erro do GNSS antes do FIX. Também ficam fora do RMSE."
             )
             self.story.append(_image(_camera_error_plot(p, errors), PAGE_WIDTH * 0.85))
         if p.ba:
@@ -393,7 +394,7 @@ class _Builder:
                 ("Convergência", f"{'sim' if ba.converged else 'NÃO'} ({ba.termination_type.split('.')[-1]})"),
             ]
             if ba.images_excluded_from_rmse:
-                rows.append(("Fotos sem RTK FIX (fora do RMSE)", ", ".join(ba.images_excluded_from_rmse)))
+                rows.append(("Fotos sem RTK FIX (sem observação GNSS, fora do RMSE)", ", ".join(ba.images_excluded_from_rmse)))
         self.story.append(self.kv(rows))
         if p.ba and p.ba.tie_point_cleanup_passes:
             self.story.append(Paragraph("Limpeza de tie points", self.h2))
@@ -546,7 +547,7 @@ class _Builder:
             )
         widths = [0.3, 0.1, 0.13, 0.13, 0.11, 0.11, 0.12]
         self.story.append(self.table(rows, [w * PAGE_WIDTH for w in widths]))
-        self.p("* fora do RMSE (sem RTK FIX).", self.small)
+        self.p("* sem RTK FIX: não usada como observação GNSS no ajuste e fora do RMSE.", self.small)
 
 
 def _focal_change(project: Project) -> float | None:
@@ -663,14 +664,18 @@ def _camera_error_plot(project: Project, images) -> io.BytesIO:
         du = np.array([i.d_up_cm for _, i in pts])
         fix = np.array([i.in_rmse for _, i in pts])
         ax.plot(xy[:, 0], xy[:, 1], color="#BBBBBB", lw=0.6, zorder=1)
+        # Arrow length and color scale from the RTK FIX photos only: a photo
+        # taken before the fix can be meters off and would flatten every
+        # other arrow to nothing. Those are drawn apart, with their numbers.
+        ref = fix if fix.any() else np.ones_like(fix)
         span = max(np.ptp(xy[:, 0]), np.ptp(xy[:, 1]), 1.0)
-        biggest = max(np.hypot(de, dn).max(), 0.1)
+        biggest = max(np.hypot(de[ref], dn[ref]).max(), 0.1)
         scale = 0.06 * span / biggest
         ax.quiver(
-            xy[:, 0],
-            xy[:, 1],
-            de * scale,
-            dn * scale,
+            xy[ref, 0],
+            xy[ref, 1],
+            de[ref] * scale,
+            dn[ref] * scale,
             angles="xy",
             scale_units="xy",
             scale=1,
@@ -678,11 +683,11 @@ def _camera_error_plot(project: Project, images) -> io.BytesIO:
             color="#333333",
             zorder=3,
         )
-        limit = max(np.abs(du).max(), 0.1)
+        limit = max(np.abs(du[ref]).max(), 0.1)
         sc = ax.scatter(
-            xy[fix, 0],
-            xy[fix, 1],
-            c=du[fix],
+            xy[ref, 0],
+            xy[ref, 1],
+            c=du[ref],
             cmap="coolwarm",
             vmin=-limit,
             vmax=limit,
@@ -691,21 +696,21 @@ def _camera_error_plot(project: Project, images) -> io.BytesIO:
             edgecolors="k",
             linewidths=0.3,
         )
-        if (~fix).any():
-            ax.scatter(
-                xy[~fix, 0],
-                xy[~fix, 1],
-                c=du[~fix],
-                cmap="coolwarm",
-                vmin=-limit,
-                vmax=limit,
-                s=45,
-                marker="D",
-                zorder=2,
-                edgecolors="k",
+        for k in np.flatnonzero(~fix):
+            ax.scatter(xy[k, 0], xy[k, 1], s=55, marker="D", facecolors="none", edgecolors="#C62828", zorder=4)
+            ax.annotate(
+                f"sem FIX: {np.hypot(de[k], dn[k]):.0f} cm (XY), {du[k]:+.0f} cm (Z)".replace(".", ","),
+                (xy[k, 0], xy[k, 1]),
+                textcoords="offset points",
+                xytext=(6, 6 + 10 * (k % 3)),
+                fontsize=6.5,
+                color="#C62828",
             )
-        fig.colorbar(sc, ax=ax, shrink=0.75, label="Diferença vertical dZ (cm)")
-        ax.set_title(f"Setas: diferença horizontal (maior = {biggest:.1f} cm)".replace(".", ","), fontsize=9)
+        fig.colorbar(sc, ax=ax, shrink=0.75, label="Diferença vertical dZ (cm), fotos com RTK FIX")
+        ax.set_title(
+            f"Setas: diferença horizontal nas fotos com RTK FIX (maior = {biggest:.1f} cm)".replace(".", ","),
+            fontsize=9,
+        )
     _map_axes(ax)
     return _png(fig)
 

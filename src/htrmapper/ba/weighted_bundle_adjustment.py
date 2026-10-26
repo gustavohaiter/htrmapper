@@ -103,6 +103,7 @@ _ROBUST_LOSS_TYPES = {
 # DJI XMP `RtkFlag`: 0 = no position, 16 = single point, 34 = RTK FLOAT,
 # 50 = RTK FIX.
 RTK_FIX_FLAG = "50"
+MIN_FIX_PRIORS = 3
 
 # Guards against the planar-flight self-calibration degeneracy (see module
 # docstring). Real values on the first real flight: focal moved 0.07%,
@@ -147,6 +148,9 @@ class BaConfig:
     refine_principal_point: bool = True
     refine_distortion: bool = True
     use_per_image_rtk_sigma: bool = True
+    # False: photos without an RTK FIX get no GNSS observation (see
+    # run_gnss_weighted_bundle_adjustment), as long as MIN_FIX_PRIORS have one.
+    use_non_fix_priors: bool = False
     tie_point_cleanup: bool = True
     tie_point_cleanup_max_passes: int = DEFAULT_TIE_POINT_CLEANUP_MAX_PASSES
     tie_point_error_factor: float = DEFAULT_TIE_POINT_ERROR_FACTOR
@@ -431,6 +435,20 @@ def run_gnss_weighted_bundle_adjustment(
             continue
         priors_by_name[name] = (gnss_position, *_prior_sigmas(record, accuracy, config.use_per_image_rtk_sigma))
 
+    # Photos without an RTK FIX carry no GNSS observation: their reported
+    # deviation is not trustworthy (the first two photos of the real flight,
+    # taken before the fix, reported 17 cm and were 4.2 m off), and with that
+    # weight a meters-off position pulls the block. Tie points place them.
+    # Kept only if fewer than MIN_FIX_PRIORS photos have a FIX at all.
+    non_fix_priors: dict[str, tuple[tuple[float, float, float], float, float]] = {}
+    if not config.use_non_fix_priors:
+        fix_names = [n for n in priors_by_name if _is_rtk_fix_or_unflagged(records_by_name[n])]
+        if len(fix_names) >= MIN_FIX_PRIORS:
+            non_fix_priors = {n: v for n, v in priors_by_name.items() if n not in set(fix_names)}
+            priors_by_name = {n: priors_by_name[n] for n in fix_names}
+            for name in sorted(non_fix_priors):
+                logger.info("%s: no RTK FIX (flag %s), not used as a GNSS observation", name, records_by_name[name].rtk_flag)
+
     refine_focal = config.refine_focal_length
     refine_principal_point = config.refine_principal_point
     intrinsics_notes: list[str] = []
@@ -516,6 +534,24 @@ def run_gnss_weighted_bundle_adjustment(
                 xy_sigma_m=xy_sigma,
                 z_sigma_m=z_sigma,
                 rtk_flag=record.rtk_flag,
+            )
+        )
+
+    # Photos left out of the adjustment's GNSS observations: their difference
+    # to the GNSS is still reported, never part of the RMSE.
+    ids_by_name = {reconstruction.image(i).name: i for i in reconstruction.reg_image_ids()}
+    for name, (gnss_position, xy_sigma, z_sigma) in sorted(non_fix_priors.items()):
+        image = reconstruction.image(ids_by_name[name])
+        estimated = tuple(float(v) for v in image.projection_center())
+        residuals.append(
+            CameraGnssResidual(
+                image_name=name,
+                gnss_position_m=gnss_position,
+                estimated_position_m=estimated,
+                residual_m=tuple(estimated[i] - gnss_position[i] for i in range(3)),
+                xy_sigma_m=xy_sigma,
+                z_sigma_m=z_sigma,
+                rtk_flag=records_by_name[name].rtk_flag,
             )
         )
 

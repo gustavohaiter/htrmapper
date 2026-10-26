@@ -1936,7 +1936,7 @@ foi conferida bit a bit contra a versão anterior.
 | Ortomosaico | Projetava o DEM inteiro em cada foto para achar sua área no chão | DEM amostrado em até 256 por lado, com margem proporcional | — |
 | Nuvem densa | Cache do COLMAP com padrão de 32 GB (patch-match e fusão), acima da RAM de um PC de 16 GB; sem cache, a fusão carrega todos os mapas de uma vez (~45 MB/foto no "media") | caches limitados a 40% da RAM livre; a fusão passa a usar cache quando os mapas não cabem | protege voos grandes |
 | Nuvem densa | Exportação para LAS percorria milhões de pontos um a um em Python | lê o `fused.ply` (referencial local) de uma vez; a leitura cai no método antigo se o layout for outro ou se as coordenadas forem absolutas (float32 não serve para UTM) | diferença de 0,03 mm |
-| DEM | A resolução automática calculava a densidade sobre o retângulo envolvente, contando cantos vazios como cobertos (38% no voo real): célula maior que os "2x o espaçamento" especificados | densidade sobre a área realmente ocupada (células de 4x o espaçamento), arredondada a múltiplos de 5 cm | voo real: ~0,50 → ~0,40 m |
+| DEM | (tentativa revertida, ver seção 33) resolução automática pela área ocupada | — | — |
 | DEM | O filtro de picos crescia os buracos anel a anel, com uma convolução da grade inteira por anel | vizinho mais próximo numa única transformada de distância | mesma qualidade no benchmark; 19 → 15 s em 0,25 m |
 | Importação | Lia cada foto inteira (10–20 MB) só para achar o XMP, que fica nos primeiros KB | lê os primeiros 512 KB (e o resto só se o pacote continuar além) e lê as fotos em 8 threads (o disco do Windows no WSL tem latência alta) | — |
 | Importação | Os 4 TIFs multiespectrais do Mavic 3M (`_MS_G/R/RE/NIR.TIF`), gravados na mesma pasta, entrariam no mosaico RGB | ignorados e contados no relatório de importação | — |
@@ -1950,3 +1950,35 @@ padrão, o ajuste fica ~2x mais rápido e as câmeras mudam no máximo 0,2 mm
 (a nuvem densa domina) e essa é a configuração validada contra o Pix4D. O
 COLMAP também grava as fotos desdistorcidas com JPEG ~98, sem perda de cor
 para o ortomosaico (conferido pelas tabelas de quantização).
+
+## 33. Primeiro processamento automático real (fazenda 20046, nível Médio)
+
+44 min no total, contra ~46 min estimados. Tempos: alinhamento 3 min 58 s,
+ajuste 1 min 37 s, nuvem densa 33 min (75% do total; o patch-match leva 33
+dos 33 min), DEM 4 s, ortomosaico 4 min 53 s, relatório 4 s. A precisão
+repetiu exatamente o teste validado: 56/56 fotos, focal +0,11%, reprojeção
+0,330 px, RMSE câmera × GNSS de 2,88 cm (XY) e 0,97 cm (Z).
+
+Três correções saíram do relatório:
+
+- **Fotos sem RTK FIX não são mais observação GNSS.** As fotos 0001 e 0002
+  (FLOAT, início do voo) informavam desvio de 17 cm (horizontal) e 47 cm
+  (vertical), mas estavam 4,2 m e 2,5 m fora. Com o peso do desvio
+  informado, elas puxavam o bloco: no voo sintético, uma foto assim triplica
+  o RMSE das fotos em FIX. Agora ficam de fora (os tie points as
+  posicionam), desde que pelo menos 3 fotos tenham FIX. É a prática do
+  Pix4D e do Metashape para RTK. `BaConfig.use_non_fix_priors=True` volta ao
+  comportamento anterior.
+- **A resolução automática do DEM volta ao retângulo envolvente** (validado,
+  0,50 m neste voo), só arredondada a 5 cm. A medida pela área ocupada
+  (seção 32) deu 0,35 m: com os buracos agrupados da nuvem de cana, 40,5%
+  das células saíram interpoladas (contra 30%) e foram removidos 3x mais
+  picos, sem nenhuma informação a mais.
+- **O gráfico de câmeras do relatório** escala setas e cores só pelas fotos
+  em FIX. Antes, as duas fotos FLOAT (4 m) achatavam todas as outras setas.
+  As fotos sem FIX agora são marcadas à parte, com o erro escrito.
+
+No ortomosaico entrou também um limite exato: depois que cada pixel de um
+bloco já tem duas vistas, uma foto cujo melhor ângulo possível sobre o bloco
+não supera a pior segunda vista é pulada inteira. A saída é idêntica bit a
+bit. O log passou a registrar o andamento do ortomosaico a cada 10%.
